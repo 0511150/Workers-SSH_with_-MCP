@@ -12,6 +12,10 @@ const { Server, utils } = ssh2;
 // active and the production bundle contains no redirection code.
 const hostKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' });
 const fingerprint = `SHA256:${createHash('sha256').update(utils.parseKey(hostKey).getPublicSSH()).digest('base64').replace(/=+$/, '')}`;
+const identity = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+const rsaPem = identity.export({ type: 'pkcs1', format: 'pem' });
+const rsaPkcs8 = identity.export({ type: 'pkcs8', format: 'pem' });
+const allowedKey = utils.parseKey(rsaPem);
 let authAttempts = 0;
 const peers = new Set();
 const server = new Server({ hostKeys: [hostKey], algorithms: { kex: ['ecdh-sha2-nistp256'], cipher: ['aes128-ctr'], hmac: ['hmac-sha2-256'], serverHostKey: ['rsa-sha2-256'] } }, client => {
@@ -21,6 +25,7 @@ const server = new Server({ hostKeys: [hostKey], algorithms: { kex: ['ecdh-sha2-
   client.on('authentication', ctx => {
     authAttempts++;
     if (ctx.method === 'password' && ctx.username === 'test' && ctx.password === 'fixture-only') ctx.accept();
+    else if (ctx.method === 'publickey' && ctx.username === 'test' && ctx.key.data.equals(allowedKey.getPublicSSH()) && (!ctx.signature || allowedKey.verify(ctx.blob, ctx.signature, ctx.hashAlgo))) ctx.accept();
     else ctx.reject();
   });
   client.on('ready', () => client.on('session', accept => {
@@ -81,4 +86,23 @@ test('changed host fingerprint is rejected before credentials are sent', { timeo
 test('wrong SSH password returns a tool error', { timeout: 45000 }, async () => {
   const result = await call('ssh_connect', { ...args, password: 'incorrect' });
   assert.equal(result.isError, true);
+});
+
+for (const [format, privateKey] of [['RSA PKCS#1 PEM', rsaPem], ['RSA PKCS#8 PEM', rsaPkcs8]]) {
+  test(`${format} authenticates through the real SSH server`, { timeout: 45000 }, async () => {
+    const { password, ...connection } = args;
+    const connected = await call('ssh_connect', { ...connection, authMethod: 'publickey', privateKey });
+    assert.equal(connected.isError, undefined, JSON.stringify(connected));
+    const { connectionId } = JSON.parse(connected.content[0].text);
+    assert.equal((await call('ssh_send', { connectionId, data: 'echo KEY_OK\n' })).isError, undefined);
+    assert.equal((await call('ssh_disconnect', { connectionId })).isError, undefined);
+  });
+}
+test('encrypted and malformed RSA PEM keys are rejected', { timeout: 45000 }, async () => {
+  const { password, ...connection } = args;
+  const encrypted = identity.export({ type: 'pkcs1', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'fixture-passphrase' });
+  for (const privateKey of [encrypted, '-----BEGIN RSA PRIVATE KEY-----\nYWJj\n-----END RSA PRIVATE KEY-----']) {
+    const result = await call('ssh_connect', { ...connection, authMethod: 'publickey', privateKey });
+    assert.equal(result.isError, true);
+  }
 });

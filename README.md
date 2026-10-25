@@ -37,7 +37,7 @@ npm run dev
 
 | 工具 | 用途 |
 | --- | --- |
-| `ssh_connect` | 创建 SSH 会话，返回 `connectionId`；必填 `host`、`username`、`authMethod`、`expectedFingerprint`，密码或未加密 OpenSSH 私钥二选一 |
+| `ssh_connect` | 创建 SSH 会话，返回 `connectionId`；必填 `host`、`username`、`authMethod`、`expectedFingerprint`，密码或未加密 OpenSSH / RSA PEM 私钥二选一 |
 | `ssh_send` | 传入 `connectionId` 和 `data`，执行命令时自行追加 `\n`；它是交互式终端输入，不返回 exit code |
 | `ssh_read` | 读取并清空当前输出缓冲；尚无输出时稍后再调用 |
 | `ssh_disconnect` | 关闭连接 |
@@ -89,7 +89,7 @@ npm run check
 - 基于 xterm.js 的响应式终端，支持桌面端和移动端、自动缩放、全屏和会话日志。
 - 内置 SFTP 文件管理，可浏览目录、上传/下载文件、新建与删除空目录、删除文件和重命名。
 - 内置实时进程管理，通过独立 WebSocket 和 SSH exec channel 展示 `top` 进程、CPU、负载、内存与 Swap 使用率。
-- 支持 SSH password 与单密码提示的 keyboard-interactive 认证，以及 Ed25519、RSA、ECDSA 的未加密 OpenSSH 私钥认证。
+- 支持 SSH password 与单密码提示的 keyboard-interactive 认证、Ed25519/RSA/ECDSA 的未加密 OpenSSH 私钥，以及未加密 RSA PEM（PKCS#1 / PKCS#8）私钥认证。
 - 首次连接时暂停认证并显示主机 SHA-256 指纹，确认后才会发送 SSH 凭据。
 - SSH 连接成功后自动写入浏览器本地"历史记录"，密码使用 AES-256-GCM 加密，私钥不保存。
 - 支持 UTF-8、GB18030、Big5 显示编码、初始命令和分享链接（密码认证时链接携带 Base64 密码，粘贴即自动连接）。
@@ -118,14 +118,16 @@ Cloudflare Worker
 | 类别 | 当前支持 |
 | --- | --- |
 | SSH 协议 | SSH 2.0 交互式 Shell、PTY、SFTP v3、窗口尺寸同步、Keepalive |
-| 用户认证 | Password、单密码提示 keyboard-interactive、OpenSSH Ed25519、RSA、ECDSA P-256/P-384/P-521 私钥 |
+| 用户认证 | Password、单密码提示 keyboard-interactive、OpenSSH Ed25519/RSA/ECDSA P-256/P-384/P-521，以及 RSA PEM（PKCS#1 / PKCS#8）私钥 |
 | 密钥交换 | `curve25519-sha256`、`ecdh-sha2-nistp256` |
 | 主机密钥 | Ed25519、ECDSA P-256/P-384/P-521、RSA SHA-2 |
 | 加密算法 | AES-128/256-GCM、AES-128/192/256-CTR |
 | MAC | HMAC-SHA2-256、HMAC-SHA2-512（AES-GCM 不使用独立 MAC） |
 | 终端编码 | UTF-8、GB18030、Big5（取决于浏览器 `TextDecoder` 支持） |
 
-**限制**：只能连接公网 IP 或解析结果全部为公网地址的域名；不支持出站 TCP 25 端口；不支持加密私钥、PEM/PKCS#8 私钥、SSH Agent、多因素键盘交互认证、SCP、端口转发、ProxyJump、SSH 压缩和会话内 rekey。文件上传与下载单文件限制为 64 MiB，目录删除仅支持空目录。
+**限制**：只能连接公网 IP 或解析结果全部为公网地址的域名；不支持出站 TCP 25 端口；不支持需要口令解锁的加密私钥、非 RSA 的 PEM/PKCS#8 私钥、SSH Agent、多因素键盘交互认证、SCP、端口转发、ProxyJump、SSH 压缩和会话内 rekey。文件上传与下载单文件限制为 64 MiB，目录删除仅支持空目录。
+
+私钥文件扩展名（`.key`、`.pem` 等）不决定格式。`BEGIN OPENSSH PRIVATE KEY` 是 OpenSSH 格式，`BEGIN RSA PRIVATE KEY` 是 RSA PKCS#1 PEM，`BEGIN PRIVATE KEY` 是 PKCS#8（本项目支持其中的 RSA 密钥）。“未加密”表示私钥本身不需要额外口令解锁，与网站访问密钥和服务器登录密码无关；SSH 网络连接仍然加密。选择“私钥认证”后可直接选择受支持的文件，原文件不需要转换，私钥不加入历史记录。
 
 ## 部署教程
 

@@ -121,7 +121,7 @@ export function parseConnectMessage(value: unknown): SSHConnectionConfig {
   const password = typeof raw.password === 'string' ? raw.password : undefined;
   const privateKey = typeof raw.privateKey === 'string' ? raw.privateKey : undefined;
   if (raw.authMethod === 'password' && (password === undefined || password.length > 4096 || privateKey !== undefined)) throw new Error('Password is required and must be the only credential');
-  if (raw.authMethod === 'publickey' && (!privateKey || privateKey.length > 128 * 1024 || !privateKey.includes('BEGIN OPENSSH PRIVATE KEY') || password !== undefined)) throw new Error('An unencrypted OpenSSH private key is required and must be the only credential');
+  if (raw.authMethod === 'publickey' && (!privateKey || privateKey.length > 128 * 1024 || !/^-----BEGIN (?:OPENSSH PRIVATE KEY|RSA PRIVATE KEY|PRIVATE KEY)-----/.test(privateKey.trim()) || password !== undefined)) throw new Error('An unencrypted OpenSSH or RSA PEM private key is required and must be the only credential');
   if (raw.expectedFingerprint !== undefined && (typeof raw.expectedFingerprint !== 'string' || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(raw.expectedFingerprint))) throw new Error('Invalid host key fingerprint');
   const term = typeof raw.term === 'string' && /^[A-Za-z0-9._+-]{1,64}$/.test(raw.term) ? raw.term : 'xterm-256color';
 

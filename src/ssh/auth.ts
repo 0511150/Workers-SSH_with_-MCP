@@ -190,9 +190,11 @@ export class SSHAuth {
   }
 
   /**
-   * Parse an OpenSSH private key and detect its type.
+   * Parse an unencrypted OpenSSH or RSA PEM private key and detect its type.
    */
   private static async parsePrivateKey(pem: string): Promise<ParsedKey> {
+    if (/^-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(pem.trim())) return this.parseRsaPem(pem);
+    if (/ENCRYPTED|Proc-Type:\s*4,ENCRYPTED/.test(pem)) throw new Error('Encrypted private keys require passphrase support; use an unencrypted key');
     const match = /^-----BEGIN OPENSSH PRIVATE KEY-----\r?\n([A-Za-z0-9+/=\r\n]+)\r?\n-----END OPENSSH PRIVATE KEY-----$/.exec(pem.trim());
     if (!match) throw new Error('Unsupported private key format; only OpenSSH keys are accepted');
     const b64 = match[1].replace(/\r?\n/g, '');
@@ -291,6 +293,35 @@ export class SSHAuth {
     } else {
       throw new Error(`Unsupported key type: ${keyType}`);
     }
+  }
+
+  /** Import RSA PKCS#1/PKCS#8 PEM using native Web Crypto; no private-key logging. */
+  private static async parseRsaPem(pem: string): Promise<ParsedKey> {
+    const match = /^-----BEGIN (RSA PRIVATE KEY|PRIVATE KEY)-----\r?\n([A-Za-z0-9+/=\r\n]+)\r?\n-----END \1-----$/.exec(pem.trim());
+    if (!match) throw new Error('Malformed RSA PEM key; encrypted PEM keys are not supported');
+    const encoded = match[2].replace(/[\r\n]/g, '');
+    let raw: Uint8Array;
+    try {
+      const binary = atob(encoded);
+      if (!encoded || encoded.length % 4 !== 0 || btoa(binary) !== encoded) throw new Error();
+      raw = Uint8Array.from(binary, c => c.charCodeAt(0));
+    } catch { throw new Error('Malformed RSA PEM Base64 data'); }
+    const algorithm = new Uint8Array([0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00]);
+    const pkcs8 = match[1] === 'RSA PRIVATE KEY'
+      ? this.buildDERSequence(concat(new Uint8Array([2, 1, 0]), algorithm, this.buildDEROctetString(raw)))
+      : raw;
+    try {
+      const imported = await crypto.subtle.importKey('pkcs8', toBufferSource(pkcs8), RSA_ALGO, true, ['sign']);
+      const jwk = await crypto.subtle.exportKey('jwk', imported);
+      if (jwk.kty !== 'RSA' || !jwk.n || !jwk.e) throw new Error();
+      const decode = (value: string): Uint8Array => {
+        const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+        return Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')), c => c.charCodeAt(0));
+      };
+      const publicKeyBlob = concat(encodeString(SSH_RSA), this.sshMPInt(decode(jwk.e)), this.sshMPInt(decode(jwk.n)));
+      const signingKey = await crypto.subtle.importKey('pkcs8', toBufferSource(pkcs8), RSA_ALGO, false, ['sign']);
+      return { signingKey, publicKeyBlob, keyType: SSH_RSA, rsaPkcs8: pkcs8 };
+    } catch { throw new Error('Invalid RSA PEM private key; only unencrypted RSA PKCS#1/PKCS#8 keys are supported'); }
   }
 
   /**
