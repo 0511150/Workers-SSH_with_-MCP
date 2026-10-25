@@ -4,6 +4,8 @@
 
 ## 快速初始化
 
+当前部署配置使用自定义域名 `ssh.05s.us`，MCP 地址为 `https://ssh.05s.us/mcp`，并关闭 `workers.dev` 入口。Fork 到其他账号部署时，请将 `wrangler.toml` 中的域名改为自己的域名。
+
 使用 Node.js 22.18+（Windows ARM 请安装 x64 Node.js，以兼容 Cloudflare workerd）：
 
 ```bash

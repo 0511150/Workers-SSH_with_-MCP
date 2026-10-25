@@ -1,7 +1,8 @@
 name = "workers-ssh-with-mcp"
 main = "src/worker.ts"
 compatibility_date = "2026-07-01"
-workers_dev = true
+workers_dev = false
+routes = [{ pattern = "ssh.05s.us", custom_domain = true }]
 
 [build]
 command = "node node_modules/vite/bin/vite.js build --config vite.config.ts"
