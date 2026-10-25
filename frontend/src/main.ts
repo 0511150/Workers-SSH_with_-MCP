@@ -160,9 +160,9 @@ const STATIC_MESSAGE_TRANSLATIONS: Record<string, string> = {
   '端口必须介于 1 和 65535 之间。': 'Port must be between 1 and 65535.',
   '请输入有效的 SSH 用户名。': 'Enter a valid SSH username.',
   '主机指纹必须使用 SHA256:base64 格式。': 'Host fingerprint must use the SHA256:base64 format.',
-  '请粘贴或选择未加密的 OpenSSH 私钥。': 'Paste or choose an unencrypted OpenSSH private key.',
+  '请粘贴或选择未加密的 OpenSSH 或 RSA PEM 私钥。': 'Paste or choose an unencrypted OpenSSH or RSA PEM private key.',
   '私钥大于 64 KiB。': 'The private key is larger than 64 KiB.',
-  '仅支持未加密的 OpenSSH 私钥。': 'Only unencrypted OpenSSH private keys are supported.',
+  '支持未加密的 OpenSSH、RSA PEM 和 RSA PKCS#8 私钥。': 'Unencrypted OpenSSH, RSA PEM and RSA PKCS#8 private keys are supported.',
   '请检查必填项和字段格式。': 'Check the required fields and their formats.',
 };
 
@@ -1134,9 +1134,9 @@ function validateConnection(): string | null {
   if (profileError) return profileError;
   if (authMethod() === 'publickey') {
     const key = ui.privateKey.value.trim();
-    if (!key) return bilingual('请粘贴或选择未加密的 OpenSSH 私钥。', 'Paste or choose an unencrypted OpenSSH private key.');
+    if (!key) return bilingual('请粘贴或选择未加密的 OpenSSH 或 RSA PEM 私钥。', 'Paste or choose an unencrypted OpenSSH or RSA PEM private key.');
     if (new TextEncoder().encode(key).length > MAX_KEY_BYTES) return bilingual('私钥大于 64 KiB。', 'The private key is larger than 64 KiB.');
-    if (!key.includes('BEGIN OPENSSH PRIVATE KEY')) return bilingual('仅支持未加密的 OpenSSH 私钥。', 'Only unencrypted OpenSSH private keys are supported.');
+    if (!/^-----BEGIN (?:OPENSSH PRIVATE KEY|RSA PRIVATE KEY|PRIVATE KEY)-----/.test(key)) return bilingual('支持未加密的 OpenSSH、RSA PEM 和 RSA PKCS#8 私钥。', 'Unencrypted OpenSSH, RSA PEM and RSA PKCS#8 private keys are supported.');
   }
   return null;
 }
@@ -2548,3 +2548,18 @@ void initialize().catch(() => {
   initializeCompatibilityAPI();
   initMobileToolbar();
 });
+
+const logoutButton = document.createElement('button');
+logoutButton.type = 'button';
+logoutButton.className = 'icon-button';
+logoutButton.textContent = '退出';
+logoutButton.title = '退出工作台 / Sign out';
+logoutButton.setAttribute('aria-label', '退出工作台 / Sign out');
+logoutButton.addEventListener('click', async () => {
+  logoutButton.disabled = true;
+  try {
+    const response = await fetch('/auth/logout', { method: 'POST' });
+    if (response.ok) { disconnect(); location.replace('/'); }
+  } finally { logoutButton.disabled = false; }
+});
+document.querySelector('.topbar')?.append(logoutButton);

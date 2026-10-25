@@ -25,7 +25,6 @@ export function corsResponse(response: Response): Response {
   // 同源/CORS 约束，101 响应无需附加 CORS 头。
   if (response.webSocket) return response;
   const headers = new Headers(response.headers);
-  headers.set('Access-Control-Allow-Origin', '*');
   headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   headers.set('Access-Control-Allow-Headers', 'Content-Type');
   return new Response(response.body, {
@@ -47,7 +46,9 @@ export function jsonError(error: string, status: number): Response {
 }
 
 export function isProductionHttp(request: Request): boolean {
-  return new URL(request.url).protocol === 'http:' && request.headers.has('CF-Connecting-IP');
+  const url = new URL(request.url);
+  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  return url.protocol === 'http:' && !loopback && request.headers.has('CF-Connecting-IP');
 }
 
 export function httpsRedirect(request: Request): Response {

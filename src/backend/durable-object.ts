@@ -246,8 +246,7 @@ export class SSHSessionDO implements DurableObject {
   }
 
   private connectTimeout(): number {
-    const configured = Number(this.env.CONNECT_TIMEOUT_MS ?? 10_000);
-    return Number.isFinite(configured) ? Math.min(30_000, Math.max(2_000, Math.floor(configured))) : 10_000;
+    return 10_000;
   }
 
   private async consumeTicket(ticket: string, ip: string): Promise<boolean> {
