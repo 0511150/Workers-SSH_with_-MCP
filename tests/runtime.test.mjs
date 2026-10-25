@@ -21,12 +21,14 @@ import worker, { AuthGuard, SSHSessionDO, MCPSSHSession } from './src/worker.ts'
 export { SSHSessionDO, MCPSSHSession };
 export class TestAuthGuard extends AuthGuard {
   async seed(state) { await this.ctx.storage.put('ban', state); }
+  async seedCalls(rows) { await this.ctx.storage.put('mcp-calls', rows); }
   async snapshot() { return await this.ctx.storage.get('ban'); }
 }
 export default { async fetch(request, env) {
   const url = new URL(request.url);
   if (url.pathname === '/__test_seed') { await env.AUTH_GUARD.getByName(url.searchParams.get('ip')).seed(await request.json()); return new Response('ok'); }
   if (url.pathname === '/__test_snapshot') return Response.json(await env.AUTH_GUARD.getByName(url.searchParams.get('ip')).snapshot());
+  if (url.pathname === '/__test_seed_calls') { await env.AUTH_GUARD.getByName('__mcp-audit').seedCalls(await request.json()); return new Response('ok'); }
   return worker.fetch(request, env);
 } };`, resolveDir: process.cwd() }, bundle: true, write: false, format: 'esm', platform: 'browser', external: ['cloudflare:*'], target: 'es2022' });
 const key = 'test-only-long-random-key-please-ignore';
@@ -129,11 +131,37 @@ test('official MCP SDK can initialize, list tools, ping and receive tool errors'
     assert.equal(result.isError, true);
   } finally { await client.close(); }
 });
+test('MCP audit requires authentication, retains 500 entries and excludes credentials and input', async () => {
+  const seeded = Array.from({ length: 500 }, (_, i) => ({ id: `seed-${i}`, timestamp: i, tool: 'ssh_read', host: '', success: true, duration: 0 }));
+  await request('/__test_seed_calls', { method: 'POST', body: JSON.stringify(seeded) });
+  const result = await mcp(rpc('tools/call', { name: 'ssh_connect', arguments: { host: '127.0.0.1', username: 'test', authMethod: 'password', password: 'sensitive-must-not-be-stored', expectedFingerprint: `SHA256:${'a'.repeat(43)}` } }));
+  assert.equal((await result.json()).result.isError, true);
+  assert.equal((await request('/api/audit', {}, '203.0.113.232')).status, 401);
+  const response = await request('/api/audit', { headers: { Authorization: `Bearer ${key}` } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  const text = await response.text();
+  assert.equal(text.includes('sensitive-must-not-be-stored'), false);
+  assert.equal(text.includes(key), false);
+  const rows = JSON.parse(text).calls;
+  assert.equal(rows.length, 500);
+  assert.equal(rows[0].tool, 'ssh_connect');
+  assert.equal(rows[0].success, false);
+  assert.equal(rows.at(-1).id, 'seed-1');
+  assert.deepEqual(Object.keys(rows[0]).sort(), ['duration','host','id','success','timestamp','tool']);
+  const longRows = Array.from({ length: 300 }, (_, i) => ({ id: `long-${i}`, timestamp: i, tool: 'ssh_connect', host: 'h'.repeat(253), success: true, duration: 0 }));
+  await request('/__test_seed_calls', { method: 'POST', body: JSON.stringify(longRows) });
+  await mcp(rpc('tools/call', { name: 'ssh_read', arguments: { connectionId: 'd'.repeat(64) } }));
+  const bounded = await (await request('/api/audit', { headers: { Authorization: `Bearer ${key}` } })).json();
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded.calls)) <= 96 * 1024);
+  assert.ok(bounded.calls.length < 301);
+});
 test('SQLite ban survives disposal and a fresh runtime, and missing or short keys fail closed', async () => {
   const path = await mkdtemp(join(tmpdir(), 'webssh-ban-test-'));
   const options = { modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-07-01', durableObjectsPersist: path, durableObjects: { AUTH_GUARD: { className: 'TestAuthGuard', useSQLite: true }, SSH_SESSIONS: { className: 'SSHSessionDO', useSQLite: true }, MCP_SSH: { className: 'MCPSSHSession', useSQLite: true } }, bindings: { ACCESS_KEY: key } };
   const first = createMiniflare(options);
   await first.dispatchFetch('https://example.com/__test_seed?ip=203.0.113.240', { method: 'POST', body: JSON.stringify({ failures: 0, strikes: 4, until: -1 }) });
+  await first.dispatchFetch('https://example.com/__test_seed_calls', { method: 'POST', body: JSON.stringify([{ id: 'persistent-audit', timestamp: 1, tool: 'ssh_read', host: '', success: true, duration: 2 }]) });
   await first.dispose();
   const restarted = createMiniflare(options);
   try {
@@ -142,6 +170,8 @@ test('SQLite ban survives disposal and a fresh runtime, and missing or short key
     const response = await restarted.dispatchFetch('https://example.com/mcp', { method: 'POST', headers: { 'CF-Connecting-IP': '203.0.113.240', Authorization: `Bearer ${key}` } });
     assert.equal(response.status, 429);
     assert.equal((await response.json()).until, -1);
+    const audit = await restarted.dispatchFetch('https://example.com/api/audit', { headers: { Authorization: `Bearer ${key}` } });
+    assert.equal((await audit.json()).calls[0].id, 'persistent-audit');
     await restarted.setOptions(convertOptions({ ...options, bindings: { ACCESS_KEY: 'short' } }));
     assert.equal((await restarted.dispatchFetch('https://example.com/api/session')).status, 503);
     await restarted.setOptions(convertOptions({ ...options, bindings: {} }));

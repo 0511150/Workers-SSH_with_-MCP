@@ -14,6 +14,7 @@ import { resetTerminalForConnection } from './terminal-session';
 import { WebSocketReconnectManager } from './ws-reconnect';
 import type { ReconnectLogEntry } from './ws-reconnect';
 import './style.css';
+import { mountSwitchWorkspace } from './switch-workspace';
 
 type AuthMethod = 'password' | 'publickey';
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
@@ -391,6 +392,7 @@ function applyLanguage(language: Language, persist = false): void {
 }
 
 let profiles: SavedProfile[] = [];
+let switchWorkspace: ReturnType<typeof mountSwitchWorkspace> | null = null;
 let hostKeys = loadHostKeys();
 let socket: WebSocket | null = null;
 let connectionState: ConnectionState = 'idle';
@@ -704,6 +706,13 @@ networkManager = new NetworkManager({
 });
 
 function terminalTheme(): Record<string, string> {
+  if (document.documentElement.dataset.theme === 'light') return {
+    background: '#ffffff', foreground: '#242428', cursor: '#242428', cursorAccent: '#ffffff',
+    selectionBackground: '#dedee8', black: '#242428', red: '#c43c49', green: '#16815f',
+    yellow: '#9c6b0d', blue: '#3267ac', magenta: '#9652a4', cyan: '#168b94', white: '#d3d3db',
+    brightBlack: '#777785', brightRed: '#dd5360', brightGreen: '#16a87c', brightYellow: '#ad811e',
+    brightBlue: '#4d82cb', brightMagenta: '#b175bf', brightCyan: '#32a5af', brightWhite: '#f8f8fa',
+  };
   return {
     background: '#080d12',
     foreground: '#d7e2e6',
@@ -1269,6 +1278,7 @@ async function deleteProfile(id: string): Promise<void> {
 }
 
 function renderProfiles(): void {
+  switchWorkspace?.refresh();
   ui.profileList.replaceChildren();
   ui.profileCount.textContent = String(profiles.length);
   if (profiles.length === 0) {
@@ -2563,3 +2573,31 @@ logoutButton.addEventListener('click', async () => {
   } finally { logoutButton.disabled = false; }
 });
 document.querySelector('.topbar')?.append(logoutButton);
+
+switchWorkspace = mountSwitchWorkspace({
+  hosts: () => profiles,
+  select: applyProfile,
+  remove: deleteProfile,
+  connect,
+  panel: setPanelOpen,
+  tab: setWorkspaceTab,
+  state: () => connectionState,
+  target: () => reconnectParams?.host ?? '',
+  resize: () => fitTerminal(false),
+  save: async () => {
+    const error = validateProfileFields();
+    if (error) throw new Error(error);
+    const previous = profiles.find(profile => profile.id === ui.profileId.value);
+    const profile = await readProfileFromForm(ui.password.value);
+    const result = await persistHistoryMutation({ kind: 'upsert', profile });
+    if (!result.persisted) throw new Error('无法保存主机，请检查浏览器存储权限。');
+    if (previous && passwordContext(previous) !== passwordContext(profile)) await persistHistoryMutation({ kind: 'delete', target: passwordContext(previous) });
+    renderProfiles();
+  },
+});
+document.addEventListener('switch-font-size', event => {
+  const value = (event as CustomEvent<number>).detail;
+  if (Number.isFinite(value) && value >= 11 && value <= 20) { terminal.options.fontSize = value; fitTerminal(false); }
+});
+new MutationObserver(() => { terminal.options.theme = terminalTheme(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+terminal.options.theme = terminalTheme();

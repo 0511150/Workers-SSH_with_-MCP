@@ -4,6 +4,16 @@ import { attempt, validSecret, type BanState } from './auth-policy';
 import { jsonError, secureResponse } from './http-security';
 
 export class AuthGuard extends DurableObject<Env> {
+  async recordCall(entry: { tool: string; host: string; success: boolean; duration: number }): Promise<void> {
+    await this.ctx.storage.transaction(async tx => {
+      const rows = await tx.get<unknown[]>('mcp-calls') ?? [];
+      rows.push({ ...entry, id: crypto.randomUUID(), timestamp: Date.now() });
+      const retained = rows.slice(-500);
+      while (retained.length && new TextEncoder().encode(JSON.stringify(retained)).byteLength > 96 * 1024) retained.shift();
+      await tx.put('mcp-calls', retained);
+    });
+  }
+  async calls(): Promise<unknown[]> { return [...(await this.ctx.storage.get<unknown[]>('mcp-calls') ?? [])].reverse(); }
   async check(valid: boolean): Promise<{ allowed: boolean; blocked: boolean; until: number }> {
     return this.ctx.storage.transaction(async tx => {
       const previous = await tx.get<BanState>('ban') ?? { failures: 0, strikes: 0, until: 0 };

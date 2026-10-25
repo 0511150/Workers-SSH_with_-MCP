@@ -37,6 +37,11 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
   if (!tool) return rpc(id, undefined, { code: -32602, message: 'Unknown tool' });
   const args = params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? params.arguments as Record<string, unknown> : {};
   if (Object.keys(args).some(key => !(key in tool.inputSchema.properties)) || tool.inputSchema.required.some(key => !(key in args))) return rpc(id, undefined, { code: -32602, message: 'Invalid tool arguments' });
+  const started = Date.now();
+  const audit = async (success: boolean): Promise<void> => {
+    try { await env.AUTH_GUARD.getByName('__mcp-audit').recordCall({ tool: tool.name, host: typeof args.host === 'string' ? args.host.slice(0, 253) : '', success, duration: Date.now() - started }); }
+    catch { console.error('Unable to persist MCP call metadata'); }
+  };
   try {
     let result: unknown;
     if (params.name === 'ssh_connect') {
@@ -52,8 +57,10 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
       } else if (params.name === 'ssh_read') result = await stub.read();
       else result = await stub.close();
     }
+    await audit(true);
     return rpc(id, { content: [{ type: 'text', text: JSON.stringify(result) }] });
   } catch (error) {
+    await audit(false);
     return rpc(id, { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : 'SSH operation failed' }] });
   }
 }

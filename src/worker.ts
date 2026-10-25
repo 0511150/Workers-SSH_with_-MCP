@@ -191,6 +191,9 @@ export default {
         if (rejected) return rejected;
       }
       if (url.pathname === '/mcp') return handleMcp(request, env);
+      if (url.pathname === '/api/audit' && request.method === 'GET') {
+        return secureResponse(Response.json({ calls: await env.AUTH_GUARD.getByName('__mcp-audit').calls() }, { headers: { 'Cache-Control': 'no-store' } }));
+      }
       if (url.pathname === '/api/admin/unban' && request.method === 'POST') {
         const data = await readJson(request) as { ip?: unknown };
         if (typeof data.ip !== 'string' || !/^[a-fA-F0-9:.]{2,64}$/.test(data.ip)) return jsonError('Invalid IP', 400);
