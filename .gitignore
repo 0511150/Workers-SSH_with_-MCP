@@ -7,8 +7,8 @@ coverage/
 .env*
 !.env.example
 .workbuddy/
-tests/
 deliverables/
 frontend/dist-*
 scripts-tmp/
-docs/
+.tools/
+.secrets.*

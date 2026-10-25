@@ -46,11 +46,7 @@ export interface TerminalSize {
   rows: number;
 }
 
-export interface Env {
-  SSH_SESSIONS: DurableObjectNamespace;
-  ASSETS?: Fetcher;
-  CONNECT_TIMEOUT_MS?: string;
-}
+export interface Env extends CloudflareBindings {}
 
 export const SSH_MSG_DISCONNECT = 1;
 export const SSH_MSG_IGNORE = 2;

@@ -2548,3 +2548,18 @@ void initialize().catch(() => {
   initializeCompatibilityAPI();
   initMobileToolbar();
 });
+
+const logoutButton = document.createElement('button');
+logoutButton.type = 'button';
+logoutButton.className = 'icon-button';
+logoutButton.textContent = '退出';
+logoutButton.title = '退出工作台 / Sign out';
+logoutButton.setAttribute('aria-label', '退出工作台 / Sign out');
+logoutButton.addEventListener('click', async () => {
+  logoutButton.disabled = true;
+  try {
+    const response = await fetch('/auth/logout', { method: 'POST' });
+    if (response.ok) { disconnect(); location.replace('/'); }
+  } finally { logoutButton.disabled = false; }
+});
+document.querySelector('.topbar')?.append(logoutButton);

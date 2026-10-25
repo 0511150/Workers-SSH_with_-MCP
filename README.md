@@ -1,11 +1,85 @@
-# CF-Workers-WebSSH
+# Workers SSH with MCP
+
+基于 [cmliu/CF-Workers-WebSSH](https://github.com/cmliu/CF-Workers-WebSSH) 的 fork，保留原有 WebSSH / SFTP / 进程管理，增加访问密钥、持久化逐级封禁和原生 Workers 远程 MCP 服务。保留 Apache-2.0 许可证和原作者署名。
+
+## 快速初始化
+
+使用 Node.js 22.18+（Windows ARM 请安装 x64 Node.js，以兼容 Cloudflare workerd）：
+
+```bash
+npm ci
+npm run setup
+npm run dev
+```
+
+初始化只询问**密钥长度**（最少 10，默认 64，推荐 32–128），使用安全随机数生成密钥并保存到 Git 忽略的 `.dev.vars`，不会在终端打印密钥，也不会覆盖现有密钥。用本地编辑器查看该文件，将值保存到密码管理器。在浏览器打开 `http://localhost:8787`，输入生成的密钥登录。访问密钥与目标服务器的 SSH 密码是不同的凭据。
+
+`npm run deploy` 会上传本地生成的密钥并部署。若使用 Cloudflare Workers Builds，在部署配置中提供 **ACCESS_KEY Secret**（至少 10 位，推荐 32 位以上随机密码）；它是唯一需要手动设置的应用配置。Durable Objects 和 Assets 自动绑定，不需要配置 timeout。密钥不存在或不足 10 位时服务拒绝访问，不会回退为匿名模式。
+
+## 远程 MCP
+
+部署后使用 `https://你的域名/mcp`，传输类型为 **Streamable HTTP**，鉴权头为 `Authorization: Bearer <ACCESS_KEY>`。支持 JSON 响应，不提供 GET SSE 订阅；不依赖服务器文件系统或 stdio，直接运行于 Cloudflare Workers。客户端须支持自定义 Bearer Header；需要 OAuth 自动发现的客户端需要另行接入 OAuth，本项目没有实现 OAuth。
+
+支持如下客户端配置的工具可填写（占位值请在本地替换，勿提交真实密钥）：
+
+```json
+{
+  "mcpServers": {
+    "workers-ssh": {
+      "url": "https://你的域名/mcp",
+      "headers": { "Authorization": "Bearer <ACCESS_KEY>" }
+    }
+  }
+}
+```
+
+| 工具 | 用途 |
+| --- | --- |
+| `ssh_connect` | 创建 SSH 会话，返回 `connectionId`；必填 `host`、`username`、`authMethod`、`expectedFingerprint`，密码或未加密 OpenSSH 私钥二选一 |
+| `ssh_send` | 传入 `connectionId` 和 `data`，执行命令时自行追加 `\n`；它是交互式终端输入，不返回 exit code |
+| `ssh_read` | 读取并清空当前输出缓冲；尚无输出时稍后再调用 |
+| `ssh_disconnect` | 关闭连接 |
+
+首次连接示例：
+
+```json
+{
+  "name": "ssh_connect",
+  "arguments": {
+    "host": "ssh.example.com",
+    "port": 22,
+    "username": "admin",
+    "authMethod": "password",
+    "password": "<SSH_PASSWORD>",
+    "expectedFingerprint": "SHA256:<通过服务器控制台等可信渠道核验的43位指纹>"
+  }
+}
+```
+
+MCP 必须提供已在可信渠道核验的主机指纹；不自动接受未知或变更的密钥。SSH 凭据仅在会话内存中使用，不存储到 Durable Objects。每个会话最多 15 分钟，Worker 重启后需重新连接；输出缓冲最多保留 256 KiB 字符，发生截断会标记 `truncated`。所有持有访问密钥的客户端共享管理权限，请只把密钥交给可信客户端，终端输出应视为不可信数据。
+
+## 逐级封禁与恢复
+
+这是适用于 Workers 的 Fail2ban 风格鉴权逻辑，而非需要 Linux 守护进程的 fail2ban 软件。网页与 MCP 按 Cloudflare 提供的客户端 IP 共用计数；每 5 次认证失败升级一次：**1 分钟 → 15 分钟 → 24 小时 → 永久**。正确密钥不能绕过正在生效的封禁；认证成功只清除连续失败次数，不清除历史升级级别。每个 IP 使用独立 SQLite Durable Object，以事务防止并发漏记，状态在重启后保留。
+
+管理员可从**未被封禁的 IP**携带正确 Bearer 密钥调用 `POST /api/admin/unban`，JSON 请求体为 `{"ip":"被封禁的IP"}`；浏览器调用还需同源。若所有管理员出口都被封禁，可在 Cloudflare 的 Durable Objects Data Studio 中定位 `AUTH_GUARD` 对应 IP 的对象并删除 `ban` 记录。轮换访问密钥会使已签发网页登录 Cookie 失效，但不会清除 IP 封禁。共享出口/NAT 下的用户共享 IP 封禁状态。
+
+网页登录采用 HttpOnly、Secure、SameSite=Strict 的签名 Cookie，24 小时过期；退出登录清除本机 Cookie，已复制的 Cookie 在有效期内仍有效，需要立即撤销时轮换 ACCESS_KEY。静态代码资源公开，应用 HTML、SSH API 与 MCP 均受鉴权保护。生产环境应始终使用 HTTPS；本地开发使用 localhost。
+
+## 验证
+
+```bash
+npm run check
+```
+
+执行 Worker / 前端类型检查、Node 单元测试、真实 workerd + SQLite Durable Objects 集成测试，以及前端构建与 Wrangler 部署 dry-run。集成测试覆盖登录、Cookie 篡改、官方 MCP 客户端、SSH 握手与命令收发、指纹变更前拒绝发送凭据、错误密码、私网拦截、并发封禁及管理员恢复。SSH 测试使用本地受控服务器，仅在测试 bundle 中重定向 TCP；不连接真实公网主机。测试专用状态控制接口只存在于测试 bundle，不进入生产 Worker。
 
 一个运行在 Cloudflare Workers 上的原生 WebSSH 终端。浏览器通过 HTTPS/WebSocket 连接 Worker，Worker 使用 Cloudflare TCP Sockets 直接连接公网 SSH 服务器，并在边缘运行时内完成 SSH 2.0 握手、主机密钥校验、用户认证和交互式 PTY 会话。
 
 运行时无 SSH 第三方依赖，前端、会话网关、SSH 客户端实现和静态资源均由同一个 Worker 部署提供。
 
 > [!IMPORTANT]
-> 项目始终允许匿名创建网关会话，不提供内置访问令牌或用户身份认证。公网部署前务必使用 Cloudflare Access、WAF 与限流策略保护页面和 API，并关闭不需要的 `workers.dev` 公网入口。
+> 页面、SSH API 和 MCP 都必须验证访问密钥。可以按需叠加 Cloudflare Access、WAF 与边缘限流；若对 MCP 使用 Access，还需为客户端配置相应的服务身份凭据。
 
 ## 功能特性
 
@@ -53,7 +127,7 @@ Cloudflare Worker
 
 ## 部署教程
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?repository=https://github.com/cmliu/CF-Workers-WebSSH)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?repository=https://github.com/0511150/Workers-SSH_with_-MCP)
 
 点击上方按钮，授权 Cloudflare 读取你的 GitHub 仓库后即可一键创建并部署 Worker。部署平台会自动读取仓库中的 `wrangler.toml`，并以 `npm run deploy` 作为构建命令完成首次构建与发布。
 
@@ -63,17 +137,19 @@ Cloudflare Worker
 1. Fork 该项目到用户自己的 GitHub 仓库。
 2. 在 `Cloudflare` > `Workers 和 Pages` > `创建应用程序` > `Continue with GitHub` 按钮，选择已 Fork 的项目进行部署。
 3. 在"构建命令"（Build Command）一栏中填入 `npm run deploy`。
-4. 点击"部署"按钮即可完成部署。
+4. 设置至少 10 位的 `ACCESS_KEY` Secret（推荐 32 位以上），点击"部署"。不需要配置连接超时。
 
 ## 配置项
 
 | 名称 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `CONNECT_TIMEOUT_MS` | Variable | `"10000"` | TCP 建连超时，运行时限制在 2000–30000 ms。 |
+| `ACCESS_KEY` | Secret | 无 | 至少 10 位，推荐 32 位以上随机密钥。 |
+| `AUTH_GUARD` | Durable Object binding | 已配置 | 持久化鉴权失败计数与封禁。 |
+| `MCP_SSH` | Durable Object binding | 已配置 | MCP SSH 会话。 |
 | `SSH_SESSIONS` | Durable Object binding | 已配置 | 每个连接独立的会话对象。 |
 | `ASSETS` | Workers Assets binding | 已配置 | 将 `dist/` 静态资源交给 Worker 提供。 |
 
-会话创建始终匿名，不存在用于开启、关闭或保护会话创建的项目变量。公开网关可能被滥用、产生费用或导致 Cloudflare 账户受限，应在 Cloudflare 边缘配置身份访问策略、WAF、限流和使用监控。
+原项目的连接超时环境变量已删除，内部固定保留 10 秒 TCP 建连保护，避免无限等待；无用户可配置 timeout 项。
 
 ## 自定义域名与 Cloudflare Access
 
@@ -98,7 +174,7 @@ routes = [
 ## 本地开发
 
 ```bash
-cp .env.example .dev.vars   # Windows: Copy-Item .env.example .dev.vars
+npm run setup               # 输入密钥长度，生成 .dev.vars
 npm run dev                 # 启动 Wrangler，访问 http://localhost:8787
 ```
 
@@ -159,7 +235,7 @@ npm run dev:web    # 访问 http://localhost:5173，Vite 代理 /api 到 8787
 | 接口 | 方法 | 用途 |
 | --- | --- | --- |
 | `/api/health` | `GET` | 返回 Worker 与 SSH 功能健康状态 |
-| `/api/session` | `POST` | 匿名创建一次性会话票据 |
+| `/api/session` | `POST` | 鉴权后创建一次性会话票据 |
 | `/api/ssh?ticket=...&session=...` | `GET` + WebSocket Upgrade | 进入对应 Durable Object 并建立 SSH 会话 |
 | `/api/sftp?session=...&token=...` | `GET` + WebSocket Upgrade | 使用一次性附着令牌进入当前会话的文件通道 |
 | `/api/processes?session=...&token=...` | `GET` + WebSocket Upgrade | 使用一次性附着令牌进入当前会话的进程监控通道 |

@@ -2,8 +2,14 @@ import type { Env } from './types';
 import { SSHSessionDO } from './backend/durable-object';
 import { GeoService, classifyIp } from './backend/geo-service';
 import { corsPreflightResponse, corsResponse, httpsRedirect, isProductionHttp, jsonError, secureResponse } from './http-security';
+import { AuthGuard, authenticate, cookieValid, login, readJson } from './auth';
+import { validSecret } from './auth-policy';
+import { loginPage } from './login-page';
+import { handleMcp } from './mcp';
+import { MCPSSHSession } from './mcp-ssh';
 
 export { SSHSessionDO };
+export { AuthGuard, MCPSSHSession };
 
 // Remote-IP geolocation is served straight from the Worker (no Durable Object
 // round-trip). The cache lives at module scope, so it is per-isolate and resets
@@ -170,6 +176,27 @@ export default {
         if (request.method === 'GET' || request.method === 'HEAD') return httpsRedirect(request);
         return jsonError('HTTPS is required', 403);
       }
+      const origin = request.headers.get('Origin');
+      if ((isApiRequest || url.pathname.startsWith('/auth/') || url.pathname === '/mcp') && origin && origin !== url.origin) return jsonError('Origin is not allowed', 403);
+      if (url.pathname === '/auth/login') {
+        if (request.method !== 'POST') return jsonError('Method not allowed', 405);
+        return login(request, env);
+      }
+      if (url.pathname === '/auth/logout' && request.method === 'POST') {
+        if (origin !== url.origin) return jsonError('Origin is not allowed', 403);
+        return secureResponse(Response.json({ ok: true }, { headers: { 'Set-Cookie': 'webssh_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0', 'Cache-Control': 'no-store' } }));
+      }
+      if (url.pathname === '/mcp' || isApiRequest) {
+        const rejected = await authenticate(request, env, url.pathname === '/mcp');
+        if (rejected) return rejected;
+      }
+      if (url.pathname === '/mcp') return handleMcp(request, env);
+      if (url.pathname === '/api/admin/unban' && request.method === 'POST') {
+        const data = await readJson(request) as { ip?: unknown };
+        if (typeof data.ip !== 'string' || !/^[a-fA-F0-9:.]{2,64}$/.test(data.ip)) return jsonError('Invalid IP', 400);
+        await env.AUTH_GUARD.getByName(data.ip.toLowerCase()).unblock();
+        return secureResponse(Response.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } }));
+      }
       if (isApiRequest && request.method === 'OPTIONS') {
         return corsResponse(corsPreflightResponse());
       }
@@ -204,7 +231,16 @@ export default {
       }
       if (isApiRequest) return corsResponse(jsonError('Not found', 404));
       if (!env.ASSETS) return jsonError('Static assets binding is not configured', 503);
-      return secureResponse(await env.ASSETS.fetch(request));
+      const assetResponse = await env.ASSETS.fetch(request);
+      // Assets may return SPA HTML for an unknown filename; inspect the actual
+      // response rather than trusting a suffix that could bypass the login page.
+      if (assetResponse.headers.get('Content-Type')?.includes('text/html')) {
+        if (!validSecret(env.ACCESS_KEY)) return jsonError('请配置至少 10 位的 ACCESS_KEY，推荐 32 位以上随机密码。', 503);
+        if (!await cookieValid(request, env.ACCESS_KEY)) return loginPage();
+        const rejected = await authenticate(request, env);
+        if (rejected) return rejected;
+      }
+      return secureResponse(assetResponse);
     } catch (error) {
       console.error('Worker request failed', error instanceof Error ? error.message : String(error));
       const response = jsonError('Internal server error', 500);

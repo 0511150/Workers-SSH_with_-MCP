@@ -1,10 +1,10 @@
-name = "cf-workers-webssh"
+name = "workers-ssh-with-mcp"
 main = "src/worker.ts"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
 [build]
-command = "npm run build:web"
+command = "node node_modules/vite/bin/vite.js build --config vite.config.ts"
 
 [assets]
 directory = "./dist"
@@ -12,8 +12,14 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = true
 
-[vars]
-CONNECT_TIMEOUT_MS = "10000"
+[observability]
+enabled = true
+
+[observability.traces]
+enabled = true
+
+[secrets]
+required = ["ACCESS_KEY"]
 
 [[durable_objects.bindings]]
 name = "SSH_SESSIONS"
@@ -22,3 +28,15 @@ class_name = "SSHSessionDO"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SSHSessionDO"]
+
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
+[[durable_objects.bindings]]
+name = "MCP_SSH"
+class_name = "MCPSSHSession"
+
+[[migrations]]
+tag = "v2-mcp-auth"
+new_sqlite_classes = ["AuthGuard", "MCPSSHSession"]
