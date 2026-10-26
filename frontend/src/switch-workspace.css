@@ -213,3 +213,5 @@
 #saved-key-select { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--surface); }
 
 #clear-terminal .button-label { display: inline; margin-left: 5px; }
+
+#switch-mcp-bearer { overflow-wrap: anywhere; user-select: all; }

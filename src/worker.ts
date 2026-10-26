@@ -190,6 +190,10 @@ export default {
         if (rejected) return rejected;
       }
       if (url.pathname === '/mcp') return handleMcp(request, env);
+      if (url.pathname === '/api/mcp-config') {
+        if (request.method !== 'GET') return jsonError('Method not allowed', 405);
+        return secureResponse(Response.json({ url: `${url.origin}/mcp`, bearer: env.ACCESS_KEY }, { headers: { 'Cache-Control': 'private, no-store' } }));
+      }
       if (url.pathname === '/api/servers') {
         const vault = env.AUTH_GUARD.getByName('__servers');
         const id = url.searchParams.get('id');

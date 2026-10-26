@@ -254,3 +254,14 @@ test('isolated session documents require login and permit only same-origin embed
   assert.equal((await request('/', { headers })).headers.get('x-frame-options'), 'DENY');
   assert.match(await (await request('/session-view')).text(), /PRIVATE ACCESS/);
 });
+
+test('MCP config reveals the shared Bearer only after authentication and cannot be cached', async () => {
+  assert.equal((await request('/api/mcp-config', {}, '203.0.113.235')).status, 401);
+  const login = await request('/auth/login', { method: 'POST', headers: { Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+  const headers = { Cookie: login.headers.get('set-cookie').split(';')[0] };
+  const response = await request('/api/mcp-config', { headers });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual(await response.json(), { url: 'https://example.com/mcp', bearer: key });
+  assert.equal((await request('/api/mcp-config', { headers: { ...headers, Origin: 'https://untrusted.example' } })).status, 403);
+});

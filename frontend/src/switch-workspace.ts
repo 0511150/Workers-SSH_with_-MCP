@@ -190,11 +190,20 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
       $('switch-unban').addEventListener('submit', event => { event.preventDefault(); void fetch('/api/admin/unban', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: $<HTMLInputElement>('switch-unban-ip').value.trim() }) }).then(async r => { const data = await r.json(); $('switch-unban-result').textContent = r.ok ? '已解除封禁。' : data.error ?? '操作失败。'; }).catch(() => { $('switch-unban-result').textContent = '网络连接失败。'; }); });
       const auditCard = document.createElement('section'); auditCard.className = 'switch-protection-records'; card.append(auditCard); renderAudit(auditCard);
     } else if (tab === 'mcp') {
-      card.innerHTML = '<h2>MCP 接入</h2><label class="switch-static-field">URL<code id="switch-mcp-url"></code></label><label class="switch-static-field">Bearer<code>与网页登录密码相同</code></label><details class="switch-mcp-example"><summary>展开接入示例</summary><pre id="switch-config-preview"></pre><button type="button" id="switch-copy-config">复制接入示例</button></details>';
+      card.innerHTML = '<h2>MCP 接入</h2><label class="switch-static-field">URL<code id="switch-mcp-url"></code></label><label class="switch-static-field">Bearer<code id="switch-mcp-bearer">正在读取…</code></label><button type="button" id="switch-copy-bearer" disabled>复制 Bearer</button><details class="switch-mcp-example"><summary>展开接入示例</summary><pre id="switch-config-preview"></pre><button type="button" id="switch-copy-config" disabled>复制接入示例</button></details>';
       $('switch-mcp-url').textContent = `${location.origin}/mcp`;
-      const config = JSON.stringify({ mcpServers: { 'workers-ssh': { type: 'http', url: `${location.origin}/mcp`, headers: { Authorization: 'Bearer <网页登录密码>' } } } }, null, 2);
-      $('switch-config-preview').textContent = config;
-      $('switch-copy-config').onclick = () => { void navigator.clipboard.writeText(config).then(() => status('接入示例已复制')); };
+      void fetch('/api/mcp-config', { cache: 'no-store' }).then(async response => {
+        if (!response.ok) throw new Error('无法读取 Bearer，请确认登录仍有效。');
+        const data = await response.json() as { url: string; bearer: string };
+        if (!card.isConnected) return;
+        $('switch-mcp-url').textContent = data.url;
+        $('switch-mcp-bearer').textContent = data.bearer;
+        const config = JSON.stringify({ mcpServers: { 'workers-ssh': { type: 'http', url: data.url, headers: { Authorization: `Bearer ${data.bearer}` } } } }, null, 2);
+        $('switch-config-preview').textContent = config;
+        const copy = (value: string, message: string): void => { void navigator.clipboard.writeText(value).then(() => status(message)).catch(() => status('复制失败，请手动选择并复制。')); };
+        const bearerButton = $<HTMLButtonElement>('switch-copy-bearer'); bearerButton.disabled = false; bearerButton.onclick = () => copy(data.bearer, 'Bearer 已复制');
+        const configButton = $<HTMLButtonElement>('switch-copy-config'); configButton.disabled = false; configButton.onclick = () => copy(config, '接入配置已复制');
+      }).catch(error => { if (card.isConnected) $('switch-mcp-bearer').textContent = error instanceof Error ? error.message : '读取失败'; });
     } else if (tab === 'keys') {
       renderKeys(card);
     } else if (tab === 'about') {
