@@ -34,10 +34,10 @@ new_sqlite_classes = ["SSHSessionDO"]
 name = "AUTH_GUARD"
 class_name = "AuthGuard"
 
-[[durable_objects.bindings]]
-name = "MCP_SSH"
-class_name = "MCPSSHSession"
-
 [[migrations]]
 tag = "v2-mcp-auth"
 new_sqlite_classes = ["AuthGuard", "MCPSSHSession"]
+
+[[migrations]]
+tag = "v3-retire-mcp-sessions"
+deleted_classes = ["MCPSSHSession"]

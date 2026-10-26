@@ -6,10 +6,9 @@ import { AuthGuard, authenticate, cookieValid, login, readJson } from './auth';
 import { validSecret } from './auth-policy';
 import { loginPage } from './login-page';
 import { handleMcp } from './mcp';
-import { MCPSSHSession } from './mcp-ssh';
 
 export { SSHSessionDO };
-export { AuthGuard, MCPSSHSession };
+export { AuthGuard };
 
 // Remote-IP geolocation is served straight from the Worker (no Durable Object
 // round-trip). The cache lives at module scope, so it is per-isolate and resets
@@ -191,6 +190,45 @@ export default {
         if (rejected) return rejected;
       }
       if (url.pathname === '/mcp') return handleMcp(request, env);
+      if (url.pathname === '/api/mcp-config') {
+        if (request.method !== 'GET') return jsonError('Method not allowed', 405);
+        return secureResponse(Response.json({ url: `${url.origin}/mcp`, bearer: env.ACCESS_KEY }, { headers: { 'Cache-Control': 'private, no-store' } }));
+      }
+      if (url.pathname === '/api/servers') {
+        const vault = env.AUTH_GUARD.getByName('__servers');
+        const id = url.searchParams.get('id');
+        if (id !== null && !/^[a-zA-Z0-9-]{1,64}$/.test(id)) return jsonError('Invalid server ID', 400);
+        const reply = (data: unknown) => secureResponse(Response.json(data, { headers: { 'Cache-Control': 'no-store' } }));
+        try {
+          if (request.method === 'GET') return reply(id ? { server: await vault.server(id) } : { servers: await vault.servers() });
+          if (request.method === 'PUT') {
+            const raw = await readJson(request, 131072);
+            await vault.saveServer(raw);
+            return reply({ ok: true });
+          }
+          if (request.method === 'PATCH' && id) {
+            const data = await readJson(request) as { fingerprint?: unknown; previousFingerprint?: unknown };
+            if (typeof data.fingerprint !== 'string' || (data.previousFingerprint !== undefined && typeof data.previousFingerprint !== 'string')) return jsonError('Invalid fingerprint update', 400);
+            await vault.pinServer(id, data.fingerprint, data.previousFingerprint as string ?? ''); return reply({ ok: true });
+          }
+          if (request.method === 'DELETE' && id) { await vault.removeServer(id); return reply({ ok: true }); }
+          return jsonError('Method not allowed', 405);
+        } catch (error) { return jsonError(error instanceof Error ? error.message : 'Server operation failed', 400); }
+      }
+      if (url.pathname === '/api/keys') {
+        const vault = env.AUTH_GUARD.getByName('__servers'); const id = url.searchParams.get('id');
+        if (id !== null && !/^[a-zA-Z0-9-]{1,64}$/.test(id)) return jsonError('Invalid key ID', 400);
+        const reply = (data: unknown) => secureResponse(Response.json(data, { headers: { 'Cache-Control': 'no-store' } }));
+        try {
+          if (request.method === 'GET') return reply(id ? { key: await vault.key(id) } : { keys: await vault.keys() });
+          if (request.method === 'PUT') { await vault.saveKey(await readJson(request, 98304)); return reply({ ok: true }); }
+          if (request.method === 'DELETE' && id) { await vault.removeKey(id); return reply({ ok: true }); }
+          return jsonError('Method not allowed', 405);
+        } catch (error) { return jsonError(error instanceof Error ? error.message : 'Key operation failed', 400); }
+      }
+      if (url.pathname === '/api/audit' && request.method === 'GET') {
+        return secureResponse(Response.json({ calls: await env.AUTH_GUARD.getByName('__mcp-audit').calls() }, { headers: { 'Cache-Control': 'no-store' } }));
+      }
       if (url.pathname === '/api/admin/unban' && request.method === 'POST') {
         const data = await readJson(request) as { ip?: unknown };
         if (typeof data.ip !== 'string' || !/^[a-fA-F0-9:.]{2,64}$/.test(data.ip)) return jsonError('Invalid IP', 400);
@@ -240,7 +278,15 @@ export default {
         const rejected = await authenticate(request, env);
         if (rejected) return rejected;
       }
-      return secureResponse(assetResponse);
+      const secured = secureResponse(assetResponse);
+      if (url.pathname === '/session-view' && assetResponse.headers.get('Content-Type')?.includes('text/html')) {
+        // Only authenticated isolated session documents may be embedded by this origin.
+        const headers = new Headers(secured.headers);
+        headers.set('X-Frame-Options', 'SAMEORIGIN');
+        headers.set('Content-Security-Policy', headers.get('Content-Security-Policy')!.replace("frame-ancestors 'none'", "frame-ancestors 'self'"));
+        return new Response(secured.body, { status: secured.status, headers });
+      }
+      return secured;
     } catch (error) {
       console.error('Worker request failed', error instanceof Error ? error.message : String(error));
       const response = jsonError('Internal server error', 500);

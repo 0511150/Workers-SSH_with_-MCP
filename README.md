@@ -4,6 +4,18 @@
 
 ## 快速初始化
 
+工作台 UI 参考 [VPS Switch](https://github.com/weidu12123/vps-switch)，固定为主机列表、中央终端/文件管理、右侧详情三栏。添加服务器只负责保存，之后从列表点击“终端”或“文件”打开。多个服务器以独立标签并行连接，切换不会断开，关闭当前标签只释放对应的 SSH、SFTP 和监控通道；终端工具栏的原清屏按钮改为“关闭终端”。角色分类和服务器收藏已删除，保留昵称、搜索和标签。
+
+设置页分为“访问保护”“MCP 接入”“密钥仓库”等标签。“访问保护”同时提供逐级 IP 封禁、解封与最近 500 条脱敏登录/调用记录；“MCP 接入”在登录后展示 URL 和真实 Bearer，可直接复制；接入示例默认折叠，展开或复制时使用实际密钥。Bearer 通过已鉴权、禁止缓存的 `/api/mcp-config` 读取，不写入浏览器持久存储。网页与 MCP 共用唯一 ACCESS_KEY 和同一 IP 失败计数。
+
+密钥仓库以 AES-256-GCM 加密永久保存私钥，服务器可以通过 `keyId` 引用同一把密钥，连接时直接读取，无需重复输入。编辑服务器时选择已保存密钥，或导入新密钥并命名；原先服务器内单独保存的私钥也能继续使用，重新保存时自动收入密钥仓库。正在被服务器引用的密钥不能删除。私钥不写入浏览器持久存储，服务器地址、账号和凭据同样以随机 IV 加密存入仓库，密钥由 ACCESS_KEY 经 HKDF 派生。旧的浏览器历史不自动上传，需重新保存一次。轮换 ACCESS_KEY 前需导出/迁移仓库凭据，否则旧数据无法解密；保留旧密钥可以恢复。
+
+网页 SSH 使用首次信任（TOFU）：首次连接自动记录服务器 SHA-256 指纹并同步至服务器仓库，以后相同指纹直接连接，只有指纹改变才暂停认证并要求确认。首次信任本身无法排除首次连接被截获的情况；已有可信指纹可在高级选项中预先填写。MCP 的服务器列表与完整连接信息同时返回 `fingerprint`（尚未连接时为 null）和已有的 `expectedFingerprint`。`vps_inspect` 仍要求已记录的指纹，发现不匹配时拒绝连接。
+
+每个终端标签通过独立的同源会话文档隔离终端、WebSocket、文件和监控状态；只有已登录的 `/session-view` 允许同源嵌入，其他页面仍禁止嵌入。关闭或退出页面后释放对应连接。刷新整个工作台会关闭所有当前标签，未实现服务端恢复终端。
+
+访问记录只保存时间、类型、主机、耗时和结果，不保存密码、私钥、命令或返回正文。`GET /api/audit`、`/api/servers` 和 `/api/keys` 均要求登录或同一 Bearer 密钥，响应禁止缓存。密钥列表仅含 ID、名称和更新时间，私钥只在读取指定密钥或完整服务器连接信息时返回。
+
 当前部署配置使用自定义域名 `ssh.05s.us`，MCP 地址为 `https://ssh.05s.us/mcp`，并关闭 `workers.dev` 入口。Fork 到其他账号部署时，请将 `wrangler.toml` 中的域名改为自己的域名。
 
 使用 Node.js 22.18+（Windows ARM 请安装 x64 Node.js，以兼容 Cloudflare workerd）：
@@ -37,28 +49,17 @@ npm run dev
 
 | 工具 | 用途 |
 | --- | --- |
-| `ssh_connect` | 创建 SSH 会话，返回 `connectionId`；必填 `host`、`username`、`authMethod`、`expectedFingerprint`，密码或未加密 OpenSSH / RSA PEM 私钥二选一 |
-| `ssh_send` | 传入 `connectionId` 和 `data`，执行命令时自行追加 `\n`；它是交互式终端输入，不返回 exit code |
-| `ssh_read` | 读取并清空当前输出缓冲；尚无输出时稍后再调用 |
-| `ssh_disconnect` | 关闭连接 |
-
-首次连接示例：
+| `vps_list` | 无参数，列出服务器 ID、名称、地址、端口、用户名、认证方式、已核验指纹；不含密码或私钥 |
+| `vps_getdata` | 参数 `id`，返回该服务器全部连接信息，包括密码或私钥；只交给可信客户端 |
+| `vps_inspect` | 参数 `id`，对已保存的 Linux 服务器执行固定只读采样，返回 CPU 使用率、内存/Swap、磁盘、接口流量/速率及负载 |
 
 ```json
-{
-  "name": "ssh_connect",
-  "arguments": {
-    "host": "ssh.example.com",
-    "port": 22,
-    "username": "admin",
-    "authMethod": "password",
-    "password": "<SSH_PASSWORD>",
-    "expectedFingerprint": "SHA256:<通过服务器控制台等可信渠道核验的43位指纹>"
-  }
-}
+{ "name": "vps_inspect", "arguments": { "id": "从 vps_list 获取的 ID" } }
 ```
 
-MCP 必须提供已在可信渠道核验的主机指纹；不自动接受未知或变更的密钥。SSH 凭据仅在会话内存中使用，不存储到 Durable Objects。每个会话最多 15 分钟，Worker 重启后需重新连接；输出缓冲最多保留 256 KiB 字符，发生截断会标记 `truncated`。所有持有访问密钥的客户端共享管理权限，请只把密钥交给可信客户端，终端输出应视为不可信数据。
+三个工具全部为独立请求，不创建连接句柄、不提供任意命令执行、轮询、会话保活或 SSE 订阅。`vps_inspect` 必须已有通过可信渠道核验的 SHA-256 主机指纹；先在网页连接以记录指纹，或在保存服务器时预填可信指纹。检查时使用短暂的 SSH exec 连接，读取 Linux `/proc` 和 `df -Pk`，间隔 1 秒采样 CPU 与网络；20 秒内未完成则失败。成功、错误、取消和超时均释放 TCP 及内部传输资源。只支持具有上述接口及标准工具的 Linux 服务器，其他系统会报检查失败。返回数据视为不可信远端内容。
+
+`GET /api/servers` 返回无凭据列表，`GET /api/servers?id=...` 返回指定主机完整凭据，`PUT /api/servers` 保存单台主机，`DELETE /api/servers?id=...` 删除。`PATCH /api/servers?id=...` 带 `fingerprint` 和 `previousFingerprint` 更新指纹并检查并发冲突。`/api/keys` 支持列表、按 ID 读取、保存和删除共享私钥。网页交互终端、SFTP 和实时监控仍按其用途保持 WebSocket；本次仅移除 MCP 长会话基础设施，部署通过迁移删除旧 MCPSSHSession 类，保留 SSHSessionDO 与 AuthGuard。
 
 ## 逐级封禁与恢复
 
@@ -74,7 +75,7 @@ MCP 必须提供已在可信渠道核验的主机指纹；不自动接受未知�
 npm run check
 ```
 
-执行 Worker / 前端类型检查、Node 单元测试、真实 workerd + SQLite Durable Objects 集成测试，以及前端构建与 Wrangler 部署 dry-run。集成测试覆盖登录、Cookie 篡改、官方 MCP 客户端、SSH 握手与命令收发、指纹变更前拒绝发送凭据、错误密码、私网拦截、并发封禁及管理员恢复。SSH 测试使用本地受控服务器，仅在测试 bundle 中重定向 TCP；不连接真实公网主机。测试专用状态控制接口只存在于测试 bundle，不进入生产 Worker。
+执行 Worker / 前端类型检查、Node 单元测试、真实 workerd + SQLite Durable Objects 集成测试，以及前端构建与 Wrangler 部署 dry-run。集成测试覆盖登录、Cookie 篡改、官方 MCP 客户端、SSH 一次性检查与资源释放、指纹变更前拒绝发送凭据、错误密码、私网拦截、并发封禁及管理员恢复。SSH 测试使用本地受控服务器，仅在测试 bundle 中重定向 TCP；不连接真实公网主机。测试专用状态控制接口只存在于测试 bundle，不进入生产 Worker。
 
 一个运行在 Cloudflare Workers 上的原生 WebSSH 终端。浏览器通过 HTTPS/WebSocket 连接 Worker，Worker 使用 Cloudflare TCP Sockets 直接连接公网 SSH 服务器，并在边缘运行时内完成 SSH 2.0 握手、主机密钥校验、用户认证和交互式 PTY 会话。
 
@@ -149,7 +150,6 @@ Cloudflare Worker
 | --- | --- | --- | --- |
 | `ACCESS_KEY` | Secret | 无 | 至少 10 位，推荐 32 位以上随机密钥。 |
 | `AUTH_GUARD` | Durable Object binding | 已配置 | 持久化鉴权失败计数与封禁。 |
-| `MCP_SSH` | Durable Object binding | 已配置 | MCP SSH 会话。 |
 | `SSH_SESSIONS` | Durable Object binding | 已配置 | 每个连接独立的会话对象。 |
 | `ASSETS` | Workers Assets binding | 已配置 | 将 `dist/` 静态资源交给 Worker 提供。 |
 

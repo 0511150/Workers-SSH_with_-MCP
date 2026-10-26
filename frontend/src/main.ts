@@ -1,7 +1,9 @@
+import { mountKeySelector } from './key-vault-ui';
+import { serverApi, type RemoteServer } from './server-api';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { historyKey, historyLabel, normalizeHistory, upsertHistoryIfNewer, type HistoryEntry } from './history';
+import { historyKey, historyLabel, normalizeHistory, upsertHistory, upsertHistoryIfNewer, type HistoryEntry } from './history';
 import { getHistoryPasswordKey } from './history-key';
 import { decryptPasswordResult, encryptPassword, isEncryptedPassword } from './password-crypto';
 import { resolveConnectionControl, resolveConnectionPanel } from './ui-state';
@@ -14,6 +16,7 @@ import { resetTerminalForConnection } from './terminal-session';
 import { WebSocketReconnectManager } from './ws-reconnect';
 import type { ReconnectLogEntry } from './ws-reconnect';
 import './style.css';
+import { mountSwitchWorkspace } from './switch-workspace';
 
 type AuthMethod = 'password' | 'publickey';
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
@@ -305,7 +308,6 @@ const ui = {
   terminalEmpty: element<HTMLElement>('terminal-empty'),
   emptyConnect: element<HTMLButtonElement>('empty-connect'),
   clearTerminal: element<HTMLButtonElement>('clear-terminal'),
-  fullscreenTerminal: element<HTMLButtonElement>('fullscreen-terminal'),
   eventMessage: element<HTMLElement>('event-message'),
   fileManagerTab: element<HTMLButtonElement>('file-manager-tab'),
   fileManagerPanel: element<HTMLElement>('file-manager-panel'),
@@ -391,7 +393,12 @@ function applyLanguage(language: Language, persist = false): void {
 }
 
 let profiles: SavedProfile[] = [];
+const remoteProfileIds = new Set<string>();
+const remoteProfileNames = new Map<string, string>();
+function rememberRemoteIds(): void { try { localStorage.setItem('workers-ssh.remote-ids', JSON.stringify([...remoteProfileIds])); } catch { /* Remote storage remains authoritative. */ } }
+let switchWorkspace: ReturnType<typeof mountSwitchWorkspace> | null = null;
 let hostKeys = loadHostKeys();
+const embeddedSession = location.pathname === '/session-view';
 let socket: WebSocket | null = null;
 let connectionState: ConnectionState = 'idle';
 let sessionStartedAt = 0;
@@ -704,6 +711,13 @@ networkManager = new NetworkManager({
 });
 
 function terminalTheme(): Record<string, string> {
+  if (document.documentElement.dataset.theme === 'light') return {
+    background: '#ffffff', foreground: '#242428', cursor: '#242428', cursorAccent: '#ffffff',
+    selectionBackground: '#dedee8', black: '#242428', red: '#c43c49', green: '#16815f',
+    yellow: '#9c6b0d', blue: '#3267ac', magenta: '#9652a4', cyan: '#168b94', white: '#d3d3db',
+    brightBlack: '#777785', brightRed: '#dd5360', brightGreen: '#16a87c', brightYellow: '#ad811e',
+    brightBlue: '#4d82cb', brightMagenta: '#b175bf', brightCyan: '#32a5af', brightWhite: '#f8f8fa',
+  };
   return {
     background: '#080d12',
     foreground: '#d7e2e6',
@@ -1151,6 +1165,9 @@ function validateConnectForm(): string | null {
   return validateConnection();
 }
 
+let selectedVaultFingerprint = '';
+const savedKeySelector = mountKeySelector(ui.privateKey, message => toast(message, 'error'));
+
 async function applyProfile(profile: SavedProfile): Promise<void> {
   const loadGeneration = ++historyPasswordLoadGeneration;
   const context = passwordContext(profile);
@@ -1165,10 +1182,22 @@ async function applyProfile(profile: SavedProfile): Promise<void> {
   ui.fingerprint.value = profile.fingerprint || hostKeys[targetKey(profile.host, profile.port, profile.username)] || '';
   setAuthMethod(profile.authMethod);
   passwordDirty = false;
-  historyPasswordLoading = profile.authMethod === 'password'
-    && Boolean(profile.passwordEncrypted);
+  historyPasswordLoading = remoteProfileIds.has(profile.id) || (profile.authMethod === 'password' && Boolean(profile.passwordEncrypted));
   setState(connectionState);
   renderProfiles();
+  if (remoteProfileIds.has(profile.id)) {
+    try {
+      const { server } = await serverApi<{ server: RemoteServer }>(`?id=${encodeURIComponent(profile.id)}`);
+      if (loadGeneration !== historyPasswordLoadGeneration) return;
+      ui.password.value = server.password ?? '';
+      ui.privateKey.value = server.privateKey ?? '';
+      await savedKeySelector.set(server.keyId ?? '');
+      selectedVaultFingerprint = server.expectedFingerprint ?? '';
+      ui.fingerprint.value = server.expectedFingerprint ?? ui.fingerprint.value;
+    } finally { if (loadGeneration === historyPasswordLoadGeneration) { historyPasswordLoading = false; setState(connectionState); } }
+    return;
+  }
+  if (profile.authMethod === 'publickey') await savedKeySelector.set();
   if (!historyPasswordLoading) return;
   const key = await getHistoryPasswordKey();
   const decrypted = key
@@ -1254,6 +1283,12 @@ async function saveConnectedProfile(): Promise<void> {
 }
 
 async function deleteProfile(id: string): Promise<void> {
+  if (remoteProfileIds.has(id)) {
+    await serverApi(`?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+    remoteProfileIds.delete(id);
+    remoteProfileNames.delete(id);
+    rememberRemoteIds();
+  }
   const removed = profiles.find((profile) => profile.id === id);
   if (!removed) return;
   const target = passwordContext(removed);
@@ -1269,6 +1304,7 @@ async function deleteProfile(id: string): Promise<void> {
 }
 
 function renderProfiles(): void {
+  switchWorkspace?.refresh();
   ui.profileList.replaceChildren();
   ui.profileCount.textContent = String(profiles.length);
   if (profiles.length === 0) {
@@ -1340,6 +1376,7 @@ function updateConnectionStatus(message: LocalizedMessage): void {
 
 function setState(state: ConnectionState, label?: string): void {
   connectionState = state;
+  if (embeddedSession) parent.postMessage({ type: 'workspace-state', state }, location.origin);
   const stateLabel = label ?? ({
     idle: bilingual('离线', 'Offline'),
     connecting: bilingual('连接中', 'Connecting'),
@@ -1480,6 +1517,13 @@ function markReady(message = bilingual('交互式 Shell 已就绪', 'Interactive
   terminal.focus();
 }
 
+function persistServerFingerprint(fingerprint: string): void {
+  const id = ui.profileId.value;
+  if (!id || !remoteProfileIds.has(id)) return;
+  const previousFingerprint = selectedVaultFingerprint;
+  void serverApi(`?id=${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ fingerprint, previousFingerprint }) }).then(() => { if (ui.profileId.value === id) selectedVaultFingerprint = fingerprint; }).catch(() => toast('指纹已用于本次连接，但保存失败；请重新保存主机。', 'error'));
+}
+
 function sendHostKeyDecision(accept: boolean): void {
   if (!awaitingHostKeyDecision || !pendingHostKey || socket?.readyState !== WebSocket.OPEN) return;
   const hostKey = pendingHostKey;
@@ -1490,9 +1534,11 @@ function sendHostKeyDecision(accept: boolean): void {
     accept,
     fingerprint: hostKey.fingerprint,
   }));
+  if (accept) { currentExpectedFingerprint = hostKey.fingerprint; if (reconnectParams) reconnectParams.pinnedKey = hostKey.fingerprint; }
   if (accept && ui.rememberHostKey.checked && currentTargetKey) {
     currentRememberedFingerprint = hostKey.fingerprint;
     void replaceRememberedHostKey(currentTargetKey, hostKey.fingerprint);
+    persistServerFingerprint(hostKey.fingerprint);
     if (targetKey() === currentTargetKey) ui.fingerprint.value = hostKey.fingerprint;
   }
   event(accept
@@ -1651,11 +1697,17 @@ function handleServerMessage(message: ServerMessage): void {
       return;
     }
     if (trust === 'matched') {
+      persistServerFingerprint(fingerprint);
       event(bilingual('已固定的主机密钥匹配。', 'Pinned host key matched.'), 'host-key');
       return;
     }
     pendingHostKey = { fingerprint, keyType, expectedFingerprint: expected, trust };
     awaitingHostKeyDecision = true;
+    if (trust === 'first-seen') {
+      ui.rememberHostKey.checked = true;
+      sendHostKeyDecision(true);
+      return;
+    }
     configureHostKeyDialog(pendingHostKey);
     ui.hostKeyTarget.textContent = ui.sessionTitle.textContent ?? currentTargetKey;
     ui.hostKeyType.textContent = keyType;
@@ -2256,16 +2308,7 @@ for (const radio of ui.form.querySelectorAll<HTMLInputElement>('input[name="auth
     setAuthMethod(authMethod());
   });
 }
-ui.form.addEventListener('submit', (formEvent) => {
-  formEvent.preventDefault();
-  if (connectionState === 'connecting' || connectionState === 'connected') {
-    disconnect(connectionState === 'connecting'
-      ? bilingual('连接已取消', 'Connection cancelled')
-      : bilingual('已由用户断开连接', 'Disconnected by user'));
-  } else if (connectionState !== 'disconnecting') {
-    void connect();
-  }
-});
+ui.form.addEventListener('submit', event => { event.preventDefault(); document.getElementById('switch-save-server')?.click(); });
 ui.shareLink.addEventListener('click', copySafeLink);
 ui.password.addEventListener('input', () => {
   cancelHistoryPasswordLoad();
@@ -2334,12 +2377,11 @@ ui.emptyConnect.addEventListener('click', () => {
   setPanelOpen(true);
   requestAnimationFrame(() => ui.host.focus());
 });
-ui.clearTerminal.addEventListener('click', () => terminal.clear());
-ui.fullscreenTerminal.addEventListener('click', async () => {
-  if (document.fullscreenElement === ui.terminalCard) await document.exitFullscreen();
-  else await ui.terminalCard.requestFullscreen();
+ui.clearTerminal.disabled = !embeddedSession;
+ui.clearTerminal.addEventListener('click', () => {
+  if (embeddedSession) parent.postMessage({ type: 'workspace-close-request' }, location.origin);
+  else document.dispatchEvent(new Event('workspace-close-active'));
 });
-document.addEventListener('fullscreenchange', () => fitTerminal(true));
 ui.fileManagerTab.addEventListener('click', () => toggleWorkspaceTab('files'));
 ui.networkDetailTab.addEventListener('click', () => toggleWorkspaceTab('network'));
 ui.processManagerTab.addEventListener('click', () => toggleWorkspaceTab('processes'));
@@ -2516,6 +2558,22 @@ try { storedTheme = localStorage.getItem(THEME_STORAGE_KEY); } catch { /* Storag
 if (storedTheme === 'light' || storedTheme === 'dark') document.documentElement.dataset.theme = storedTheme;
 async function initialize(): Promise<void> {
   profiles = await loadProfiles();
+  try {
+    const { servers } = await serverApi<{ servers: RemoteServer[] }>();
+    let knownRemoteIds: string[] = [];
+    try { knownRemoteIds = JSON.parse(localStorage.getItem('workers-ssh.remote-ids') ?? '[]'); } catch { /* No previous remote metadata. */ }
+    const currentIds = new Set(servers.map(server => server.id));
+    if (Array.isArray(knownRemoteIds)) profiles = profiles.filter(profile => !knownRemoteIds.includes(profile.id) || currentIds.has(profile.id));
+    for (const server of servers) {
+      remoteProfileIds.add(server.id);
+      remoteProfileNames.set(server.id, server.name);
+      const local = profiles.find(p => passwordContext(p) === passwordContext(server));
+      const profile: SavedProfile = { ...local, id: server.id, host: server.host, port: server.port, username: server.username, authMethod: server.authMethod, initialCommand: local?.initialCommand ?? '', termType: local?.termType ?? 'xterm-256color', encoding: local?.encoding ?? 'utf-8', fingerprint: server.expectedFingerprint ?? '', updatedAt: server.updatedAt };
+      profiles = upsertHistory(profiles, profile);
+    }
+    rememberRemoteIds();
+    persistProfileSnapshot();
+  } catch { toast('服务器仓库读取失败，本地历史记录仍可使用。', 'error'); }
   applyLanguage(currentLanguage);
   element<HTMLElement>('app').hidden = false;
   renderProfiles();
@@ -2528,6 +2586,14 @@ async function initialize(): Promise<void> {
   ui.eventMessage.textContent = bilingual('Worker 运行时待命', 'Worker runtime standing by');
   initializeCompatibilityAPI();
   initMobileToolbar();
+  if (embeddedSession) {
+    document.documentElement.classList.add('session-embedded');
+    const id = new URLSearchParams(location.search).get('id');
+    const profile = profiles.find(p => p.id === id);
+    if (profile) { await applyProfile(profile); await connect(); if (new URLSearchParams(location.search).has('files')) setWorkspaceTab('files'); }
+    else toast('此服务器不存在，请关闭标签并重新保存主机。', 'error');
+    return;
+  }
   const shouldAutoConnect = applyURLParameters();
   requestAnimationFrame(() => {
     fitTerminal(false);
@@ -2563,3 +2629,56 @@ logoutButton.addEventListener('click', async () => {
   } finally { logoutButton.disabled = false; }
 });
 document.querySelector('.topbar')?.append(logoutButton);
+window.addEventListener('message', event => {
+  if (!embeddedSession || event.origin !== location.origin || event.source !== parent) return;
+  if (event.data?.type === 'workspace-close') disconnect();
+  if (event.data?.type === 'workspace-resize') fitTerminal(true);
+  if (event.data?.type === 'workspace-theme' && ['light', 'dark'].includes(event.data.theme)) document.documentElement.dataset.theme = event.data.theme;
+  if (event.data?.type === 'workspace-font' && Number.isFinite(event.data.size) && event.data.size >= 11 && event.data.size <= 20) { terminal.options.fontSize = event.data.size; fitTerminal(true); }
+  if (event.data?.type === 'workspace-view') { setWorkspaceTab(event.data.files ? 'files' : null); fitTerminal(true); }
+});
+
+switchWorkspace = mountSwitchWorkspace({
+  hosts: () => profiles,
+  prepareNew: () => { void savedKeySelector.set(); },
+  name: host => remoteProfileNames.get(host.id) ?? host.host,
+  select: applyProfile,
+  remove: deleteProfile,
+  connect,
+  panel: setPanelOpen,
+  tab: setWorkspaceTab,
+  state: () => connectionState,
+  target: () => reconnectParams?.host ?? '',
+  resize: () => fitTerminal(false),
+  save: async () => {
+    const error = validateProfileFields();
+    if (error) throw new Error(error);
+    const previous = profiles.find(profile => profile.id === ui.profileId.value);
+    const profile = await readProfileFromForm(ui.password.value);
+    if (previous) {
+      const collision = profiles.find(p => p.id !== previous.id && passwordContext(p) === passwordContext(profile));
+      if (collision) throw new Error('此地址和账号已有主机记录，请编辑已有记录。');
+      profile.id = previous.id;
+    }
+    const keyId = profile.authMethod === 'publickey' ? await savedKeySelector.ensureSaved((document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host) : undefined;
+    await serverApi('', { method: 'PUT', body: JSON.stringify({
+      id: profile.id, name: (document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host,
+      host: profile.host, port: profile.port, username: profile.username, authMethod: profile.authMethod,
+      ...(profile.authMethod === 'password' ? { password: ui.password.value } : { keyId }),
+      ...(profile.fingerprint ? { expectedFingerprint: profile.fingerprint } : {}),
+    }) });
+    remoteProfileIds.add(profile.id);
+    remoteProfileNames.set(profile.id, (document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host);
+    rememberRemoteIds();
+    const result = await persistHistoryMutation({ kind: 'upsert', profile });
+    if (!result.persisted) throw new Error('无法保存主机，请检查浏览器存储权限。');
+    if (previous && passwordContext(previous) !== passwordContext(profile)) await persistHistoryMutation({ kind: 'delete', target: passwordContext(previous) });
+    renderProfiles();
+  },
+});
+document.addEventListener('switch-font-size', event => {
+  const value = (event as CustomEvent<number>).detail;
+  if (Number.isFinite(value) && value >= 11 && value <= 20) { terminal.options.fontSize = value; fitTerminal(false); }
+});
+new MutationObserver(() => { terminal.options.theme = terminalTheme(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+terminal.options.theme = terminalTheme();
