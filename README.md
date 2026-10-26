@@ -4,9 +4,11 @@
 
 ## 快速初始化
 
-工作台 UI 参考 [VPS Switch](https://github.com/weidu12123/vps-switch)：默认显示主机列表与详情栏，打开终端或文件后进入三栏布局。主机可先保存再连接，支持昵称、收藏、角色、标签和搜索，备注保存在本浏览器。设置页提供主题、终端字号、MCP 客户端配置复制、IP 解封、MCP 调用记录和当前会话日志。未连接的主机不显示其他主机的指标；当前版本保持一个活动 SSH 会话。
+工作台 UI 参考 [VPS Switch](https://github.com/weidu12123/vps-switch)，固定为主机列表、中央终端/文件管理、右侧详情三栏；没有活动终端时也保持三栏。顶部仓库/侧栏/终端切换、分屏和单终端全屏布局已移除。支持昵称、收藏、角色、标签和搜索；角色与标签仍保存在当前浏览器。设置中的“访问与 MCP”合并登录保护、MCP 接入和最近 500 条访问/调用记录。网页与 MCP 始终共用一个 ACCESS_KEY 和同一 IP 失败计数，未增加独立 MCP 密钥。
 
-MCP 调用记录在 Durable Object 中持久保留最近 500 条已通过参数检查的工具调用，可按日期、主机、工具和成败筛选。只保存时间、工具名、连接请求中的主机、耗时和成功状态，不保存访问密钥、SSH 密码、私钥、命令正文或返回输出。通过鉴权后的 `GET /api/audit` 读取；终端读写等后续工具未携带主机参数时，主机显示为 `—`。
+保存主机时，连接地址、账号、密码或私钥会以 AES-256-GCM 加密存入服务器仓库，网页与 MCP 共用；每条使用随机 IV，服务器 ID 作为附加认证数据，密钥由 ACCESS_KEY 经 HKDF 派生。每条凭据不超过 90 KiB，最多 100 台服务器。旧的浏览器历史不会自动上传，需编辑后重新保存一次才能供 MCP 使用。私钥不会写入浏览器持久存储。轮换 ACCESS_KEY 前必须先导出/迁移服务器凭据，否则旧仓库无法解密；保留旧密钥可以恢复。共享访问密钥代表对仓库中全部 SSH 凭据的管理权限。
+
+访问记录只保存时间、工具/登录/鉴权类型、工具所访问的主机、耗时和结果；不保存密码、私钥、命令或返回内容。每个 IP 的封禁状态独立保存，访问记录与凭据仓库也各自隔离。`GET /api/audit` 与 `/api/servers` 均要求登录或同一 Bearer 密钥，响应禁止缓存。
 
 当前部署配置使用自定义域名 `ssh.05s.us`，MCP 地址为 `https://ssh.05s.us/mcp`，并关闭 `workers.dev` 入口。Fork 到其他账号部署时，请将 `wrangler.toml` 中的域名改为自己的域名。
 
@@ -41,28 +43,17 @@ npm run dev
 
 | 工具 | 用途 |
 | --- | --- |
-| `ssh_connect` | 创建 SSH 会话，返回 `connectionId`；必填 `host`、`username`、`authMethod`、`expectedFingerprint`，密码或未加密 OpenSSH / RSA PEM 私钥二选一 |
-| `ssh_send` | 传入 `connectionId` 和 `data`，执行命令时自行追加 `\n`；它是交互式终端输入，不返回 exit code |
-| `ssh_read` | 读取并清空当前输出缓冲；尚无输出时稍后再调用 |
-| `ssh_disconnect` | 关闭连接 |
-
-首次连接示例：
+| `vps_list` | 无参数，列出服务器 ID、名称、地址、端口、用户名、认证方式、已核验指纹；不含密码或私钥 |
+| `vps_getdata` | 参数 `id`，返回该服务器全部连接信息，包括密码或私钥；只交给可信客户端 |
+| `vps_inspect` | 参数 `id`，对已保存的 Linux 服务器执行固定只读采样，返回 CPU 使用率、内存/Swap、磁盘、接口流量/速率及负载 |
 
 ```json
-{
-  "name": "ssh_connect",
-  "arguments": {
-    "host": "ssh.example.com",
-    "port": 22,
-    "username": "admin",
-    "authMethod": "password",
-    "password": "<SSH_PASSWORD>",
-    "expectedFingerprint": "SHA256:<通过服务器控制台等可信渠道核验的43位指纹>"
-  }
-}
+{ "name": "vps_inspect", "arguments": { "id": "从 vps_list 获取的 ID" } }
 ```
 
-MCP 必须提供已在可信渠道核验的主机指纹；不自动接受未知或变更的密钥。SSH 凭据仅在会话内存中使用，不存储到 Durable Objects。每个会话最多 15 分钟，Worker 重启后需重新连接；输出缓冲最多保留 256 KiB 字符，发生截断会标记 `truncated`。所有持有访问密钥的客户端共享管理权限，请只把密钥交给可信客户端，终端输出应视为不可信数据。
+三个工具全部为独立请求，不创建连接句柄、不提供任意命令执行、轮询、会话保活或 SSE 订阅。`vps_inspect` 必须已有通过可信渠道核验的 SHA-256 主机指纹；先在网页连接并核验，然后保存主机。检查时使用短暂的 SSH exec 连接，读取 Linux `/proc` 和 `df -Pk`，间隔 1 秒采样 CPU 与网络；20 秒内未完成则失败。成功、错误、取消和超时均释放 TCP 及内部传输资源。只支持具有上述接口及标准工具的 Linux 服务器，其他系统会报检查失败。返回数据视为不可信远端内容。
+
+`GET /api/servers` 返回无凭据列表，`GET /api/servers?id=...` 返回指定主机完整凭据，`PUT /api/servers` 保存单台主机，`DELETE /api/servers?id=...` 删除。网页交互终端、SFTP 和实时监控仍按其用途保持 WebSocket；本次仅移除 MCP 长会话基础设施，部署通过迁移删除旧 MCPSSHSession 类，保留 SSHSessionDO 与 AuthGuard。
 
 ## 逐级封禁与恢复
 
@@ -78,7 +69,7 @@ MCP 必须提供已在可信渠道核验的主机指纹；不自动接受未知�
 npm run check
 ```
 
-执行 Worker / 前端类型检查、Node 单元测试、真实 workerd + SQLite Durable Objects 集成测试，以及前端构建与 Wrangler 部署 dry-run。集成测试覆盖登录、Cookie 篡改、官方 MCP 客户端、SSH 握手与命令收发、指纹变更前拒绝发送凭据、错误密码、私网拦截、并发封禁及管理员恢复。SSH 测试使用本地受控服务器，仅在测试 bundle 中重定向 TCP；不连接真实公网主机。测试专用状态控制接口只存在于测试 bundle，不进入生产 Worker。
+执行 Worker / 前端类型检查、Node 单元测试、真实 workerd + SQLite Durable Objects 集成测试，以及前端构建与 Wrangler 部署 dry-run。集成测试覆盖登录、Cookie 篡改、官方 MCP 客户端、SSH 一次性检查与资源释放、指纹变更前拒绝发送凭据、错误密码、私网拦截、并发封禁及管理员恢复。SSH 测试使用本地受控服务器，仅在测试 bundle 中重定向 TCP；不连接真实公网主机。测试专用状态控制接口只存在于测试 bundle，不进入生产 Worker。
 
 一个运行在 Cloudflare Workers 上的原生 WebSSH 终端。浏览器通过 HTTPS/WebSocket 连接 Worker，Worker 使用 Cloudflare TCP Sockets 直接连接公网 SSH 服务器，并在边缘运行时内完成 SSH 2.0 握手、主机密钥校验、用户认证和交互式 PTY 会话。
 
@@ -153,7 +144,6 @@ Cloudflare Worker
 | --- | --- | --- | --- |
 | `ACCESS_KEY` | Secret | 无 | 至少 10 位，推荐 32 位以上随机密钥。 |
 | `AUTH_GUARD` | Durable Object binding | 已配置 | 持久化鉴权失败计数与封禁。 |
-| `MCP_SSH` | Durable Object binding | 已配置 | MCP SSH 会话。 |
 | `SSH_SESSIONS` | Durable Object binding | 已配置 | 每个连接独立的会话对象。 |
 | `ASSETS` | Workers Assets binding | 已配置 | 将 `dist/` 静态资源交给 Worker 提供。 |
 

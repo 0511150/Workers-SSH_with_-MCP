@@ -243,7 +243,7 @@ export class SSHSession {
   private readTask: Promise<void> | null = null;
   private pendingHostConfirmation: { fingerprint: string; resolve: (accepted: boolean) => void } | null = null;
 
-  constructor(ws: WebSocket, socket: Socket, config: SSHConnectionConfig) {
+  constructor(ws: WebSocket, socket: Socket, config: SSHConnectionConfig, private readonly execCommand?: string) {
     this.ws = ws;
     this.socket = socket;
     this.config = config;
@@ -685,7 +685,7 @@ export class SSHSession {
       this.config.privateKey = undefined;
       this.status('auth_success', 'SSH authentication succeeded; opening terminal');
       this.phase = 'pty';
-      this.startKeepalive();
+      if (!this.execCommand) this.startKeepalive();
       await this.sendEncrypted(this.shellChannel.buildOpenSession(0));
       return;
     }
@@ -715,8 +715,14 @@ export class SSHSession {
       channel.handleOpenConfirmation(payload);
       if (isShell) {
         if (this.phase !== 'pty') throw new Error('Unexpected shell channel open confirmation');
-        this.pendingChannelRequest = 'pty';
-        await this.sendEncrypted(channel.buildPTYRequest(this.config.cols, this.config.rows, this.config.term));
+        if (this.execCommand) {
+          this.phase = 'shell';
+          this.pendingChannelRequest = 'shell';
+          await this.sendEncrypted(channel.buildExecRequest(this.execCommand));
+        } else {
+          this.pendingChannelRequest = 'pty';
+          await this.sendEncrypted(channel.buildPTYRequest(this.config.cols, this.config.rows, this.config.term));
+        }
       } else if (this.pendingProcessKillChannels.has(channelID)) {
         const kill = this.pendingProcessKillChannels.get(channelID)!;
         kill.openConfirmed = true;

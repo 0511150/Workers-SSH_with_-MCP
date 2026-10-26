@@ -1,7 +1,8 @@
+import { serverApi, type RemoteServer } from './server-api';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { historyKey, historyLabel, normalizeHistory, upsertHistoryIfNewer, type HistoryEntry } from './history';
+import { historyKey, historyLabel, normalizeHistory, upsertHistory, upsertHistoryIfNewer, type HistoryEntry } from './history';
 import { getHistoryPasswordKey } from './history-key';
 import { decryptPasswordResult, encryptPassword, isEncryptedPassword } from './password-crypto';
 import { resolveConnectionControl, resolveConnectionPanel } from './ui-state';
@@ -306,7 +307,6 @@ const ui = {
   terminalEmpty: element<HTMLElement>('terminal-empty'),
   emptyConnect: element<HTMLButtonElement>('empty-connect'),
   clearTerminal: element<HTMLButtonElement>('clear-terminal'),
-  fullscreenTerminal: element<HTMLButtonElement>('fullscreen-terminal'),
   eventMessage: element<HTMLElement>('event-message'),
   fileManagerTab: element<HTMLButtonElement>('file-manager-tab'),
   fileManagerPanel: element<HTMLElement>('file-manager-panel'),
@@ -392,6 +392,9 @@ function applyLanguage(language: Language, persist = false): void {
 }
 
 let profiles: SavedProfile[] = [];
+const remoteProfileIds = new Set<string>();
+const remoteProfileNames = new Map<string, string>();
+function rememberRemoteIds(): void { try { localStorage.setItem('workers-ssh.remote-ids', JSON.stringify([...remoteProfileIds])); } catch { /* Remote storage remains authoritative. */ } }
 let switchWorkspace: ReturnType<typeof mountSwitchWorkspace> | null = null;
 let hostKeys = loadHostKeys();
 let socket: WebSocket | null = null;
@@ -1174,10 +1177,19 @@ async function applyProfile(profile: SavedProfile): Promise<void> {
   ui.fingerprint.value = profile.fingerprint || hostKeys[targetKey(profile.host, profile.port, profile.username)] || '';
   setAuthMethod(profile.authMethod);
   passwordDirty = false;
-  historyPasswordLoading = profile.authMethod === 'password'
-    && Boolean(profile.passwordEncrypted);
+  historyPasswordLoading = remoteProfileIds.has(profile.id) || (profile.authMethod === 'password' && Boolean(profile.passwordEncrypted));
   setState(connectionState);
   renderProfiles();
+  if (remoteProfileIds.has(profile.id)) {
+    try {
+      const { server } = await serverApi<{ server: RemoteServer }>(`?id=${encodeURIComponent(profile.id)}`);
+      if (loadGeneration !== historyPasswordLoadGeneration) return;
+      ui.password.value = server.password ?? '';
+      ui.privateKey.value = server.privateKey ?? '';
+      ui.fingerprint.value = server.expectedFingerprint ?? ui.fingerprint.value;
+    } finally { if (loadGeneration === historyPasswordLoadGeneration) { historyPasswordLoading = false; setState(connectionState); } }
+    return;
+  }
   if (!historyPasswordLoading) return;
   const key = await getHistoryPasswordKey();
   const decrypted = key
@@ -1263,6 +1275,12 @@ async function saveConnectedProfile(): Promise<void> {
 }
 
 async function deleteProfile(id: string): Promise<void> {
+  if (remoteProfileIds.has(id)) {
+    await serverApi(`?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+    remoteProfileIds.delete(id);
+    remoteProfileNames.delete(id);
+    rememberRemoteIds();
+  }
   const removed = profiles.find((profile) => profile.id === id);
   if (!removed) return;
   const target = passwordContext(removed);
@@ -2345,11 +2363,6 @@ ui.emptyConnect.addEventListener('click', () => {
   requestAnimationFrame(() => ui.host.focus());
 });
 ui.clearTerminal.addEventListener('click', () => terminal.clear());
-ui.fullscreenTerminal.addEventListener('click', async () => {
-  if (document.fullscreenElement === ui.terminalCard) await document.exitFullscreen();
-  else await ui.terminalCard.requestFullscreen();
-});
-document.addEventListener('fullscreenchange', () => fitTerminal(true));
 ui.fileManagerTab.addEventListener('click', () => toggleWorkspaceTab('files'));
 ui.networkDetailTab.addEventListener('click', () => toggleWorkspaceTab('network'));
 ui.processManagerTab.addEventListener('click', () => toggleWorkspaceTab('processes'));
@@ -2526,6 +2539,22 @@ try { storedTheme = localStorage.getItem(THEME_STORAGE_KEY); } catch { /* Storag
 if (storedTheme === 'light' || storedTheme === 'dark') document.documentElement.dataset.theme = storedTheme;
 async function initialize(): Promise<void> {
   profiles = await loadProfiles();
+  try {
+    const { servers } = await serverApi<{ servers: RemoteServer[] }>();
+    let knownRemoteIds: string[] = [];
+    try { knownRemoteIds = JSON.parse(localStorage.getItem('workers-ssh.remote-ids') ?? '[]'); } catch { /* No previous remote metadata. */ }
+    const currentIds = new Set(servers.map(server => server.id));
+    if (Array.isArray(knownRemoteIds)) profiles = profiles.filter(profile => !knownRemoteIds.includes(profile.id) || currentIds.has(profile.id));
+    for (const server of servers) {
+      remoteProfileIds.add(server.id);
+      remoteProfileNames.set(server.id, server.name);
+      const local = profiles.find(p => passwordContext(p) === passwordContext(server));
+      const profile: SavedProfile = { ...local, id: server.id, host: server.host, port: server.port, username: server.username, authMethod: server.authMethod, initialCommand: local?.initialCommand ?? '', termType: local?.termType ?? 'xterm-256color', encoding: local?.encoding ?? 'utf-8', fingerprint: server.expectedFingerprint ?? '', updatedAt: server.updatedAt };
+      profiles = upsertHistory(profiles, profile);
+    }
+    rememberRemoteIds();
+    persistProfileSnapshot();
+  } catch { toast('服务器仓库读取失败，本地历史记录仍可使用。', 'error'); }
   applyLanguage(currentLanguage);
   element<HTMLElement>('app').hidden = false;
   renderProfiles();
@@ -2576,6 +2605,7 @@ document.querySelector('.topbar')?.append(logoutButton);
 
 switchWorkspace = mountSwitchWorkspace({
   hosts: () => profiles,
+  name: host => remoteProfileNames.get(host.id) ?? host.host,
   select: applyProfile,
   remove: deleteProfile,
   connect,
@@ -2589,6 +2619,20 @@ switchWorkspace = mountSwitchWorkspace({
     if (error) throw new Error(error);
     const previous = profiles.find(profile => profile.id === ui.profileId.value);
     const profile = await readProfileFromForm(ui.password.value);
+    if (previous) {
+      const collision = profiles.find(p => p.id !== previous.id && passwordContext(p) === passwordContext(profile));
+      if (collision) throw new Error('此地址和账号已有主机记录，请编辑已有记录。');
+      profile.id = previous.id;
+    }
+    await serverApi('', { method: 'PUT', body: JSON.stringify({
+      id: profile.id, name: (document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host,
+      host: profile.host, port: profile.port, username: profile.username, authMethod: profile.authMethod,
+      ...(profile.authMethod === 'password' ? { password: ui.password.value } : { privateKey: ui.privateKey.value }),
+      ...(profile.fingerprint ? { expectedFingerprint: profile.fingerprint } : {}),
+    }) });
+    remoteProfileIds.add(profile.id);
+    remoteProfileNames.set(profile.id, (document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host);
+    rememberRemoteIds();
     const result = await persistHistoryMutation({ kind: 'upsert', profile });
     if (!result.persisted) throw new Error('无法保存主机，请检查浏览器存储权限。');
     if (previous && passwordContext(previous) !== passwordContext(profile)) await persistHistoryMutation({ kind: 'delete', target: passwordContext(previous) });

@@ -6,10 +6,9 @@ import { AuthGuard, authenticate, cookieValid, login, readJson } from './auth';
 import { validSecret } from './auth-policy';
 import { loginPage } from './login-page';
 import { handleMcp } from './mcp';
-import { MCPSSHSession } from './mcp-ssh';
 
 export { SSHSessionDO };
-export { AuthGuard, MCPSSHSession };
+export { AuthGuard };
 
 // Remote-IP geolocation is served straight from the Worker (no Durable Object
 // round-trip). The cache lives at module scope, so it is per-isolate and resets
@@ -191,6 +190,22 @@ export default {
         if (rejected) return rejected;
       }
       if (url.pathname === '/mcp') return handleMcp(request, env);
+      if (url.pathname === '/api/servers') {
+        const vault = env.AUTH_GUARD.getByName('__servers');
+        const id = url.searchParams.get('id');
+        if (id !== null && !/^[a-zA-Z0-9-]{1,64}$/.test(id)) return jsonError('Invalid server ID', 400);
+        const reply = (data: unknown) => secureResponse(Response.json(data, { headers: { 'Cache-Control': 'no-store' } }));
+        try {
+          if (request.method === 'GET') return reply(id ? { server: await vault.server(id) } : { servers: await vault.servers() });
+          if (request.method === 'PUT') {
+            const raw = await readJson(request, 131072);
+            await vault.saveServer(raw);
+            return reply({ ok: true });
+          }
+          if (request.method === 'DELETE' && id) { await vault.removeServer(id); return reply({ ok: true }); }
+          return jsonError('Method not allowed', 405);
+        } catch (error) { return jsonError(error instanceof Error ? error.message : 'Server operation failed', 400); }
+      }
       if (url.pathname === '/api/audit' && request.method === 'GET') {
         return secureResponse(Response.json({ calls: await env.AUTH_GUARD.getByName('__mcp-audit').calls() }, { headers: { 'Cache-Control': 'no-store' } }));
       }

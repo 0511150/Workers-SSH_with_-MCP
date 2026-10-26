@@ -3,6 +3,7 @@ import './switch-workspace.css';
 
 interface Bridge {
   hosts(): HistoryEntry[];
+  name(host: HistoryEntry): string;
   select(host: HistoryEntry): Promise<void>;
   save(): Promise<void>;
   remove(id: string): Promise<void>;
@@ -22,11 +23,11 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
   let selected: HistoryEntry | null = null;
   let filter = '';
   let favoriteOnly = false;
-  let view: 'hosts' | 'terminal' | 'files' | 'settings' = 'hosts';
+  let view: 'hosts' | 'terminal' | 'files' | 'settings' = 'terminal';
   let meta: Record<string, HostMeta> = {};
   try { meta = JSON.parse(localStorage.getItem('workers-ssh.host-meta') ?? '{}'); } catch { /* Browser metadata is optional. */ }
   const persist = (): void => { try { localStorage.setItem('workers-ssh.host-meta', JSON.stringify(meta)); } catch { status('浏览器未允许保存主机备注。'); } };
-  const info = (host: HistoryEntry): HostMeta => meta[host.id] ?? { name: host.host, role: '未标记', tags: [], favorite: false };
+  const info = (host: HistoryEntry): HostMeta => meta[host.id] ?? { name: bridge.name(host), role: '未标记', tags: [], favorite: false };
   const shell = $('app-shell');
   shell.classList.add('switch-shell'); shell.dataset.view = view;
   const oldPanel = $('connection-panel');
@@ -79,27 +80,22 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
   const sessionMetrics = document.querySelector('.session-metrics'); if (sessionMetrics) $('switch-session-slot').append(sessionMetrics);
   const top = document.querySelector('.topbar')!;
   document.querySelector('.brand span:last-child')!.textContent = 'Workers SSH';
-  const navigation = document.createElement('nav'); navigation.className = 'switch-navigation';
-  navigation.append(button('⌂ 仓库', () => setView('hosts')), button('◫ 侧栏', () => { shell.classList.toggle('switch-sidebar-hidden'); bridge.resize(); }));
-  top.insertBefore(navigation, document.querySelector('.topbar-actions'));
   const actions = document.querySelector('.topbar-actions')!;
   actions.prepend(button('⚙', () => settings('general'), 'icon-button switch-settings-button'), button('＋', () => openEditor(true), 'switch-add'));
   $('switch-add-small').onclick = () => openEditor(true);
-  const titleTab = document.createElement('button'); titleTab.className = 'switch-session-tab'; titleTab.type = 'button'; titleTab.textContent = '无活动终端'; titleTab.onclick = () => setView('terminal'); navigation.append(titleTab);
   const terminalActions = document.querySelector('.terminal-actions')!;
-  terminalActions.prepend(button('左右分屏', () => { $('terminal-card').classList.add('switch-side-split'); bridge.tab('files'); bridge.resize(); }), button('上下分屏', () => { $('terminal-card').classList.remove('switch-side-split'); bridge.tab('files'); bridge.resize(); }), button('文件管理', () => setView('files')), button('详情图表', () => { shell.classList.toggle('switch-inspector-hidden'); bridge.resize(); }));
-
+  terminalActions.prepend(button('文件管理', () => setView('files')));
   const settingsPage = document.createElement('section'); settingsPage.id = 'switch-settings'; settingsPage.className = 'switch-settings'; settingsPage.hidden = true;
-  settingsPage.innerHTML = `<header class="switch-settings-heading"><div><h1>系统设置</h1><p>管理工作台偏好、MCP 接入与 Web 访问安全</p></div><button type="button" id="switch-settings-back">返回仓库</button></header><nav class="switch-settings-tabs" id="switch-settings-tabs"></nav><div id="switch-settings-body"></div>`;
+  settingsPage.innerHTML = `<header class="switch-settings-heading"><div><h1>系统设置</h1><p>管理工作台偏好、MCP 接入与 Web 访问安全</p></div><button type="button" id="switch-settings-back">返回工作台</button></header><nav class="switch-settings-tabs" id="switch-settings-tabs"></nav><div id="switch-settings-body"></div>`;
   $('app').append(settingsPage);
   $('switch-settings-back').onclick = () => setView('hosts');
   const statusNode = document.createElement('div'); statusNode.className = 'switch-status'; statusNode.setAttribute('role', 'status'); document.body.append(statusNode);
   let statusTimer = 0;
   function status(text: string): void { statusNode.textContent = text; statusNode.classList.add('visible'); window.clearTimeout(statusTimer); statusTimer = window.setTimeout(() => statusNode.classList.remove('visible'), 3500); }
   function setView(next: typeof view): void {
-    view = next; shell.dataset.view = next; shell.hidden = next === 'settings'; settingsPage.hidden = next !== 'settings';
+    next = next === 'hosts' ? 'terminal' : next; view = next; shell.dataset.view = next; shell.hidden = next === 'settings'; settingsPage.hidden = next !== 'settings';
     if (next === 'files') bridge.tab('files'); else if (next === 'terminal') bridge.tab(null);
-    if (next === 'terminal' || next === 'files') shell.classList.remove('switch-sidebar-hidden');
+
     requestAnimationFrame(bridge.resize);
   }
   async function openSelected(files = false): Promise<void> {
@@ -107,7 +103,7 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
     await bridge.select(selected);
     const active = bridge.state() === 'connected' && bridge.target() === selected.host;
     if (!active) {
-      if (selected.authMethod === 'publickey' && !$<HTMLTextAreaElement>('private-key').value) { openEditor(); status('请选择此主机的私钥，私钥不会保存到仓库。'); return; }
+      if (selected.authMethod === 'publickey' && !$<HTMLTextAreaElement>('private-key').value) { openEditor(); status('请选择此主机的私钥，保存主机后，私钥会加密存入服务器仓库。'); return; }
       if (bridge.state() !== 'idle' && bridge.state() !== 'error') { status('请先断开当前终端，再连接另一台主机。'); return; }
       await bridge.connect();
     }
@@ -119,7 +115,7 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
   $('switch-open-terminal').onclick = () => { void openSelected().catch(error => status(String(error))); };
   $('switch-open-files').onclick = () => { void openSelected(true).catch(error => status(String(error))); };
   $('switch-edit').onclick = () => { if (selected) void bridge.select(selected).then(() => openEditor()); else openEditor(true); };
-  $('switch-delete').onclick = () => { if (selected && confirm(`删除主机“${info(selected).name}”？仅删除本浏览器的记录。`)) void bridge.remove(selected.id).then(() => { selected = null; refresh(); }); };
+  $('switch-delete').onclick = () => { if (selected && confirm(`删除主机“${info(selected).name}”？将从服务器仓库和本浏览器删除记录。`)) void bridge.remove(selected.id).then(() => { selected = null; refresh(); }).catch(error => status(String(error)));  };
   $('switch-tag-form').addEventListener('submit', event => {
     event.preventDefault(); if (!selected) return;
     const value = $<HTMLInputElement>('switch-tag-input').value.trim();
@@ -164,7 +160,6 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
     $('switch-auth-mode').textContent = selected ? selected.authMethod === 'publickey' ? 'SSH 密钥' : '密码' : '—';
     const online = selected && bridge.target() === selected.host && bridge.state() === 'connected';
     $('switch-detail-state').textContent = online ? '在线' : '未连接';
-    titleTab.textContent = bridge.target() ? `● ${bridge.target()}` : '终端';
     $('switch-fingerprint').textContent = selected?.fingerprint || '首次连接时核验主机指纹；不会自动信任未知主机。';
     for (const id of ['switch-cpu-slot','switch-memory-slot','switch-network-slot','switch-session-slot']) $(id).classList.toggle('switch-unselected-resource', !online);
     const roles = $('switch-roles'); roles.replaceChildren();
@@ -174,31 +169,29 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
   }
   function settings(tab: string): void {
     setView('settings'); const nav = $('switch-settings-tabs'); nav.replaceChildren();
-    for (const [id, label] of [['general','⚙ 常规'],['security','♙ 访问安全'],['mcp','ϟ MCP Server'],['logs','▤ 调用记录'],['about','ⓘ 关于']]) nav.append(button(label, () => settings(id), `switch-setting-tab${id === tab ? ' active' : ''}`));
+    for (const [id, label] of [['general','⚙ 常规'],['security','♙ 访问与 MCP'],['about','ⓘ 关于']]) nav.append(button(label, () => settings(id), `switch-setting-tab${id === tab ? ' active' : ''}`));
     const body = $('switch-settings-body'); body.replaceChildren();
     const card = document.createElement('section'); card.className = 'switch-settings-card'; body.append(card);
-    if (tab === 'mcp') {
-      card.innerHTML = '<h2><i class="switch-dot online"></i> MCP Server 服务与 API Key</h2><p>通过 HTTPS + Bearer 密钥供远程客户端调用；服务始终要求鉴权。</p><div class="switch-setting-grid"><div><h3>远程 Streamable HTTP</h3><code id="switch-mcp-url"></code><p>网页和 MCP 使用相同的访问密钥。</p></div><label>MCP API Key<input id="switch-config-key" type="password" placeholder="在此临时填入访问密钥" autocomplete="off"><small>仅用于生成下方配置，不保存到浏览器。</small></label></div><div class="switch-config-heading"><h3>客户端接入配置预览</h3><button type="button" id="switch-copy-config">复制配置 JSON</button></div><pre id="switch-config-preview"></pre><p class="switch-hint">支持 ssh_connect、ssh_send、ssh_read、ssh_disconnect。客户端需支持自定义 Bearer Header。</p>';
-      $('switch-mcp-url').textContent = `${location.origin}/mcp`;
-      const configuration = (): string => JSON.stringify({ mcpServers: { 'workers-ssh': { type: 'http', url: `${location.origin}/mcp`, headers: { Authorization: `Bearer ${$<HTMLInputElement>('switch-config-key').value || '<ACCESS_KEY>'}` } } } }, null, 2);
-      $('switch-config-preview').textContent = configuration();
-      $('switch-config-key').addEventListener('input', () => { $('switch-config-preview').textContent = configuration().replace($<HTMLInputElement>('switch-config-key').value || '<ACCESS_KEY>', $<HTMLInputElement>('switch-config-key').value ? '••••••••' : '<ACCESS_KEY>'); });
-      $('switch-copy-config').onclick = () => { void navigator.clipboard.writeText(configuration()).then(() => status('MCP 配置已复制')).catch(() => status('浏览器未允许访问剪贴板')); };
-    } else if (tab === 'security') {
-      card.innerHTML = '<h2>Web 访问保护</h2><p>访问密钥保存在 Cloudflare Secret；网页使用 HttpOnly、Secure 和 SameSite=Strict Cookie。</p><div class="switch-setting-grid"><div><h3>逐级 IP 封禁</h3><p>每 5 次认证失败升级一次</p><strong>1 分钟 → 15 分钟 → 24 小时 → 永久</strong></div><div><h3>主机身份验证</h3><p>首次连接需确认 SHA-256 指纹，MCP 必须提供已核验的指纹。</p></div></div><h3>管理员解除 IP 封禁</h3><form id="switch-unban" class="switch-inline"><input id="switch-unban-ip" placeholder="被封禁的 IP 地址" required aria-label="解除封禁的 IP"><button type="submit">解除封禁</button></form><p class="switch-hint">需要从未被封禁的 IP 操作。</p><p id="switch-unban-result" role="status"></p>';
+    if (tab === 'security') {
+      card.innerHTML = '<h2>Web 访问保护</h2><p>访问密钥保存在 Cloudflare Secret；网页使用 HttpOnly、Secure 和 SameSite=Strict Cookie。</p><div class="switch-setting-grid"><div><h3>逐级 IP 封禁</h3><p>每 5 次认证失败升级一次</p><strong>1 分钟 → 15 分钟 → 24 小时 → 永久</strong></div><div><h3>主机身份验证</h3><p>首次连接需确认 SHA-256 指纹，MCP 检查使用仓库中已核验的指纹。</p></div></div><h3>管理员解除 IP 封禁</h3><form id="switch-unban" class="switch-inline"><input id="switch-unban-ip" placeholder="被封禁的 IP 地址" required aria-label="解除封禁的 IP"><button type="submit">解除封禁</button></form><p class="switch-hint">需要从未被封禁的 IP 操作。</p><p id="switch-unban-result" role="status"></p>';
       $('switch-unban').addEventListener('submit', event => { event.preventDefault(); void fetch('/api/admin/unban', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: $<HTMLInputElement>('switch-unban-ip').value.trim() }) }).then(async r => { const data = await r.json(); $('switch-unban-result').textContent = r.ok ? '已解除封禁。' : data.error ?? '操作失败。'; }).catch(() => { $('switch-unban-result').textContent = '网络连接失败。'; }); });
-    } else if (tab === 'logs') {
-      renderAudit(card);
+      const mcpCard = document.createElement('section'); mcpCard.className = 'switch-settings-card'; body.append(mcpCard);
+      mcpCard.innerHTML = '<h2>MCP 接入</h2><p>网页登录密码就是 MCP Bearer 密钥，共用同一套 IP 失败计数、逐级封禁与解封。无需设置第二个密钥。</p><code id="switch-mcp-url"></code><p>只提供 vps_list、vps_getdata、vps_inspect；每次请求独立完成。vps_getdata 会返回服务器密码或私钥，请仅交给可信客户端。</p><pre id="switch-config-preview"></pre><button type="button" id="switch-copy-config">复制接入示例</button>';
+      $('switch-mcp-url').textContent = `${location.origin}/mcp`;
+      const config = JSON.stringify({ mcpServers: { 'workers-ssh': { type: 'http', url: `${location.origin}/mcp`, headers: { Authorization: 'Bearer <网页登录密码>' } } } }, null, 2);
+      $('switch-config-preview').textContent = config;
+      $('switch-copy-config').onclick = () => { void navigator.clipboard.writeText(config).then(() => status('接入示例已复制，请填入同一个网页登录密码')); };
+      const auditCard = document.createElement('section'); auditCard.className = 'switch-settings-card'; body.append(auditCard); renderAudit(auditCard);
     } else if (tab === 'about') {
       card.innerHTML = '<h2>Workers SSH</h2><p>运行在 Cloudflare Workers 上的私人 SSH 与 MCP 工作台。</p><div class="switch-setting-grid"><div><h3>WebSSH</h3><p>终端、SFTP、进程与网络管理。</p></div><div><h3>安全连接</h3><p>密钥鉴权、主机指纹验证和持久化逐级封禁。</p></div></div><p>工作台布局参考 VPS Switch，连接底座基于 CF-Workers-WebSSH。</p><a href="https://github.com/0511150/Workers-SSH_with_-MCP" target="_blank" rel="noopener noreferrer">查看源代码 ↗</a>';
     } else {
-      card.innerHTML = '<h2>工作台偏好</h2><p>主机仓库和详情侧栏始终可用，不需要先打开终端。</p><div class="switch-setting-grid"><div><h3>颜色主题</h3><p>切换浅色或深色界面。</p><button type="button" id="switch-setting-theme">切换主题</button></div><div><h3>本地数据</h3><p>主机记录、备注和标签保存在当前浏览器；密码加密保存，私钥不保存。</p></div></div><h3>终端显示</h3><label>字体大小 <input id="switch-font-size" type="range" min="11" max="20" value="13"></label><p>文件管理可与终端左右或上下排列；当前版本保持一个活动 SSH 连接。</p>';
+      card.innerHTML = '<h2>工作台偏好</h2><p>主机仓库和详情侧栏始终可用，不需要先打开终端。</p><div class="switch-setting-grid"><div><h3>颜色主题</h3><p>切换浅色或深色界面。</p><button type="button" id="switch-setting-theme">切换主题</button></div><div><h3>本地数据</h3><p>保存主机时，密码或私钥加密存入服务器仓库，供网页与 MCP 共用。旧的浏览器记录需重新保存一次。备注和标签保存在当前浏览器。</p></div></div><h3>终端显示</h3><label>字体大小 <input id="switch-font-size" type="range" min="11" max="20" value="13"></label><p>固定三栏工作台，中央切换终端和文件管理；当前版本保持一个活动 SSH 连接。</p>';
       $('switch-setting-theme').onclick = () => $('theme-toggle').click();
       $('switch-font-size').addEventListener('input', () => document.dispatchEvent(new CustomEvent('switch-font-size', { detail: Number($<HTMLInputElement>('switch-font-size').value) })));
     }
   }
   function renderAudit(card: HTMLElement): void {
-    card.innerHTML = '<div class="switch-config-heading"><div><h2>MCP 调用记录</h2><p>最近 500 条工具调用元数据；不保存访问密钥、SSH 密码、私钥、命令正文或输出。</p></div><button type="button" id="switch-audit-refresh">刷新</button></div><div class="switch-audit-filters"><label>起始日期<input id="switch-audit-start" type="date"></label><label>结束日期<input id="switch-audit-end" type="date"></label><label>主机<select id="switch-audit-host"><option value="">全部主机</option></select></label><label>工具<select id="switch-audit-tool"><option value="">全部工具</option><option>ssh_connect</option><option>ssh_send</option><option>ssh_read</option><option>ssh_disconnect</option></select></label><label>结果<select id="switch-audit-result"><option value="">全部</option><option value="true">成功</option><option value="false">失败</option></select></label></div><p id="switch-audit-status" role="status">正在读取记录…</p><div class="switch-audit-table"><table><thead><tr><th>时间</th><th>工具</th><th>主机</th><th>结果</th><th>耗时</th></tr></thead><tbody id="switch-audit-rows"></tbody></table></div><details class="switch-session-history"><summary>当前页面的 SSH 会话事件</summary><div id="switch-log-view"></div></details>';
+    card.innerHTML = '<div class="switch-config-heading"><div><h2>访问与 MCP 记录</h2><p>最近 500 条登录、鉴权及工具调用元数据；不保存访问密钥、SSH 密码、私钥、命令正文或输出。</p></div><button type="button" id="switch-audit-refresh">刷新</button></div><div class="switch-audit-filters"><label>起始日期<input id="switch-audit-start" type="date"></label><label>结束日期<input id="switch-audit-end" type="date"></label><label>主机<select id="switch-audit-host"><option value="">全部主机</option></select></label><label>工具<select id="switch-audit-tool"><option value="">全部工具</option><option>web_login</option><option>web_auth</option><option>mcp_auth</option><option>vps_list</option><option>vps_getdata</option><option>vps_inspect</option></select></label><label>结果<select id="switch-audit-result"><option value="">全部</option><option value="true">成功</option><option value="false">失败</option></select></label></div><p id="switch-audit-status" role="status">正在读取记录…</p><div class="switch-audit-table"><table><thead><tr><th>时间</th><th>工具</th><th>主机</th><th>结果</th><th>耗时</th></tr></thead><tbody id="switch-audit-rows"></tbody></table></div><details class="switch-session-history"><summary>当前页面的 SSH 会话事件</summary><div id="switch-log-view"></div></details>';
     const lines = $('event-log').cloneNode(true) as HTMLElement; lines.removeAttribute('id'); lines.hidden = false; lines.className = 'switch-log-copy'; $('switch-log-view').append(lines);
     interface Row { id: string; timestamp: number; tool: string; host: string; success: boolean; duration: number }
     let rows: Row[] = [];
@@ -236,7 +229,7 @@ export function mountSwitchWorkspace(bridge: Bridge): { refresh(): void } {
     void load();
   }
   // Mirror existing live state, without probing inactive hosts or fabricating metrics.
-  new MutationObserver(() => { titleTab.textContent = $('session-title').textContent || '终端'; refresh(); }).observe($('session-title'), { childList: true, subtree: true });
+  new MutationObserver(() => refresh()).observe($('session-title'), { childList: true, subtree: true });
   new MutationObserver(() => refresh()).observe($('live-orb'), { attributes: true, attributeFilter: ['class'] });
   document.addEventListener('keydown', event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setView('hosts'); $<HTMLInputElement>('switch-search').focus(); }

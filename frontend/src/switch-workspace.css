@@ -11,21 +11,16 @@
 .brand-mark { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 9px; background: #19191b; color: white; font: 700 15px monospace; box-shadow: 0 2px 5px #0002; }
 .brand-group { gap: 12px; }
 #panel-toggle { display: none; }
-.switch-navigation { display: flex; align-items: center; gap: 8px; margin-right: auto; }
-.switch-navigation button, .switch-button, .switch-host-controls button, .switch-detail-actions button,
+.switch-button, .switch-host-controls button, .switch-detail-actions button,
 .switch-settings button, .switch-inspector-heading button, .switch-inline button, .terminal-actions .switch-button {
   border: 1px solid var(--border); background: var(--surface); border-radius: 20px;
   padding: 7px 13px; font-size: 12px; color: var(--muted); white-space: nowrap;
 }
-.switch-navigation button:hover, .switch-button:hover, .switch-settings button:hover { background: var(--surface-2); color: var(--text); }
-.switch-navigation .switch-session-tab { background: var(--surface-2); border-color: transparent; color: var(--text); max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .topbar-actions { gap: 8px; }
 .topbar .icon-button { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border); font-size: 16px; background: var(--surface); }
 .topbar .icon-button[aria-label*='退出'] { font-size: 11px; width: 44px; }
 .topbar .switch-add { order: 10; border: 0; border-radius: 50%; width: 36px; height: 36px; background: #ff7718; color: white; font-size: 26px; line-height: 1; }
 .switch-shell { height: calc(100% - 64px); display: grid; grid-template-columns: 290px minmax(0, 1fr) 330px; gap: 16px; padding: 18px; }
-.switch-shell[data-view='hosts'] { grid-template-columns: minmax(0, 1fr) 350px; }
-.switch-shell[data-view='hosts'] > .workspace { display: none; }
 .switch-shell > #panel-scrim { display: none !important; }
 .switch-hosts { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .switch-host-heading { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 16px; padding: 0 10px; }
@@ -112,18 +107,12 @@
 .switch-shell .terminal-empty { background: var(--terminal); color: var(--muted); }
 .switch-shell .terminal-empty h2 { color: var(--text); }
 .switch-shell .terminal-empty .empty-glyph { color: var(--muted-2); background: var(--surface-2); border-color: var(--border); box-shadow: none; }
-.switch-shell .terminal-card.switch-side-split.workspace-panel-open { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 .switch-shell[data-view='files'] .terminal-card { grid-template-rows: 54px minmax(0, 1fr); }
 .switch-shell[data-view='files'] .terminal-pane { grid-template-rows: 54px 0; }
 .switch-shell[data-view='files'] .terminal-stage { visibility: hidden; }
 .switch-shell[data-view='files'] .workspace-dock { min-height: 0; }
 .switch-shell .dock-tab { min-width: 75px; font-size: 10px; padding: 0 7px; }
 .switch-shell .file-tree { display: none; }
-.switch-sidebar-hidden:not([data-view='hosts']) { grid-template-columns: minmax(0, 1fr) 330px; }
-.switch-sidebar-hidden:not([data-view='hosts']) > .switch-hosts { display: none; }
-.switch-inspector-hidden:not([data-view='hosts']) { grid-template-columns: 290px minmax(0, 1fr); }
-.switch-inspector-hidden:not([data-view='hosts']) > .switch-inspector { display: none; }
-.switch-sidebar-hidden.switch-inspector-hidden:not([data-view='hosts']) { grid-template-columns: minmax(0, 1fr); }
 .switch-dialog { color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 18px; width: 440px; max-width: 94vw; max-height: 90dvh; padding: 0; box-shadow: 0 24px 80px #0003; }
 .switch-dialog::backdrop { background: #14151b50; backdrop-filter: blur(3px); }
 .switch-dialog-heading { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px 12px; }
@@ -169,46 +158,32 @@
 .switch-log-copy .event-line { color: var(--muted); }
 .switch-status { position: fixed; z-index: 300; left: 50%; bottom: 30px; transform: translate(-50%, 15px); opacity: 0; pointer-events: none; background: #19191c; color: white; border-radius: 12px; padding: 12px 20px; font-size: 12px; transition: .2s; max-width: 90vw; }
 .switch-status.visible { opacity: 1; transform: translate(-50%, 0); }
-@media (min-width: 1150px) {
-  .switch-shell:not([data-view='hosts']) .switch-host-row { padding: 12px; flex-wrap: wrap; }
-  .switch-shell:not([data-view='hosts']) .switch-host-select { flex: 1 0 100%; width: 100%; }
-  .switch-shell:not([data-view='hosts']) .switch-host-controls { margin-left: 54px; }
-  .switch-shell:not([data-view='hosts']) .switch-host-os { width: 36px; height: 36px; }
-  .switch-shell:not([data-view='hosts']) .switch-host-copy strong { font-size: 13px; }
-}
-@media (max-width: 1149px) {
-  .switch-shell { grid-template-columns: 220px minmax(0, 1fr); gap: 12px; padding: 12px; }
-  .switch-shell > .switch-inspector { display: none; }
-  .switch-shell[data-view='hosts'] { grid-template-columns: minmax(0, 1fr) 310px; }
-  .switch-shell[data-view='hosts'] > .switch-inspector { display: flex; }
-  .switch-shell:not([data-view='hosts']) .switch-host-row { flex-wrap: wrap; padding: 12px; }
-  .switch-shell:not([data-view='hosts']) .switch-host-select { flex: 1 0 100%; width: 100%; }
-  .switch-shell:not([data-view='hosts']) .switch-host-controls { margin-left: 0; }
-  .switch-shell .terminal-actions .switch-button:nth-child(-n+2) { display: none; }
-  .switch-sidebar-hidden:not([data-view='hosts']) { grid-template-columns: minmax(0, 1fr); }
-}
 @media (max-width: 700px) {
   .topbar { gap: 8px; padding: 0 12px; }
   .brand { font-size: 13px; }
-  .switch-navigation { gap: 3px; }
-  .switch-navigation button { font-size: 10px; padding: 6px; }
-  .switch-navigation .switch-session-tab, .switch-navigation button:nth-child(2), .topbar a.icon-button, #language-toggle { display: none; }
   .topbar-actions { gap: 4px; }
   .topbar .icon-button { width: 29px; height: 29px; }
-  .switch-shell, .switch-shell[data-view='hosts'] { grid-template-columns: minmax(0, 1fr); padding: 12px; gap: 12px; overflow: auto; }
-  .switch-shell[data-view='hosts'] { grid-template-rows: minmax(330px, 1fr) auto; }
-  .switch-shell:not([data-view='hosts']) .switch-hosts { display: none; }
-  .switch-shell[data-view='hosts'] > .switch-inspector { max-height: 460px; }
   .switch-host-row { padding: 12px; gap: 8px; }
   .switch-host-controls { gap: 3px; }
   .switch-host-controls .switch-star { display: none; }
   .switch-host-controls button { padding: 5px 8px; font-size: 10px; }
   .switch-host-os { width: 34px; height: 34px; }
   .switch-host-copy strong { font-size: 13px; }
-  .switch-shell > .workspace { min-height: 450px; }
   .switch-settings { padding: 20px 14px; }
   .switch-setting-grid { grid-template-columns: minmax(0, 1fr); }
   .switch-audit-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .switch-settings-card { padding: 20px; }
-  .switch-shell .terminal-card.switch-side-split.workspace-panel-open { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr 1fr; }
+}
+
+/* The workspace always has three columns, including before a connection exists. */
+.switch-shell { grid-template-columns: 260px minmax(340px, 1fr) 310px; min-width: 980px; overflow: visible; }
+.switch-shell > .switch-hosts { display: flex; }
+.switch-shell > .switch-inspector { display: flex; max-height: none; }
+.switch-shell > .workspace { display: flex; min-height: 0; }
+.switch-host-row { padding: 12px; flex-wrap: wrap; }
+.switch-host-select { flex: 1 0 100%; width: 100%; }
+.switch-host-controls { margin-left: 0; }
+@media (max-width: 980px) {
+  #app { overflow-x: auto; }
+  .switch-shell { height: calc(100% - 64px); grid-template-rows: minmax(0, 1fr); }
 }

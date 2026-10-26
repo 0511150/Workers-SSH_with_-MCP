@@ -2,8 +2,29 @@ import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './types';
 import { attempt, validSecret, type BanState } from './auth-policy';
 import { jsonError, secureResponse } from './http-security';
+import { openServer, parseServer, sealServer, serverSummary } from './server-vault';
 
 export class AuthGuard extends DurableObject<Env> {
+  async saveServer(raw: unknown): Promise<void> {
+    const server = parseServer(raw);
+    const encrypted = await sealServer(server, this.env.ACCESS_KEY);
+    await this.ctx.storage.transaction(async tx => {
+      const entries = await tx.list({ prefix: 'server:', limit: 101 });
+      if (!entries.has(`server:${server.id}`) && entries.size >= 100) throw new Error('Server limit is 100');
+      await tx.put(`server:${server.id}`, encrypted);
+    });
+  }
+  async server(id: string) {
+    const encrypted = await this.ctx.storage.get<Awaited<ReturnType<typeof sealServer>>>(`server:${id}`);
+    if (!encrypted) throw new Error('Server not found');
+    try { return await openServer(id, encrypted, this.env.ACCESS_KEY); }
+    catch { throw new Error('Cannot decrypt server credentials with current ACCESS_KEY'); }
+  }
+  async servers() {
+    const entries = await this.ctx.storage.list({ prefix: 'server:', limit: 100 });
+    return Promise.all([...entries.keys()].map(async key => serverSummary(await this.server(key.slice(7)))));
+  }
+  async removeServer(id: string): Promise<void> { await this.ctx.storage.delete(`server:${id}`); }
   async recordCall(entry: { tool: string; host: string; success: boolean; duration: number }): Promise<void> {
     await this.ctx.storage.transaction(async tx => {
       const rows = await tx.get<unknown[]>('mcp-calls') ?? [];
@@ -52,6 +73,10 @@ export async function authenticate(request: Request, env: Env, bearerOnly = fals
   const candidate = loginKey ?? (bearer?.startsWith('Bearer ') ? bearer.slice(7) : '');
   const valid = candidate.length <= 4096 && (loginKey !== undefined || bearer ? await sameSecret(candidate, env.ACCESS_KEY) : !bearerOnly && await cookieValid(request, env.ACCESS_KEY));
   const result = await env.AUTH_GUARD.getByName(clientIp(request)).check(valid);
+  if (!result.allowed || loginKey !== undefined) {
+    try { await env.AUTH_GUARD.getByName('__mcp-audit').recordCall({ tool: loginKey !== undefined ? 'web_login' : bearerOnly ? 'mcp_auth' : 'web_auth', host: '', success: result.allowed, duration: 0 }); }
+    catch { console.error('Unable to persist authentication metadata'); }
+  }
   if (result.blocked) return secureResponse(Response.json({ error: result.until === -1 ? '此 IP 已永久封禁，请联系管理员。' : '此 IP 已临时封禁。', until: result.until }, { status: 429, headers: { 'Cache-Control': 'no-store', ...(result.until === -1 ? {} : { 'Retry-After': String(Math.ceil((result.until - Date.now()) / 1000)) }) } }));
   return result.allowed ? null : secureResponse(Response.json({ error: '访问密钥无效。' }, { status: 401, headers: { 'WWW-Authenticate': 'Bearer realm="WebSSH MCP"', 'Cache-Control': 'no-store' } }));
 }
