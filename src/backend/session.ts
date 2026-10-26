@@ -528,6 +528,7 @@ export class SSHSession {
     } else if (!await this.confirmHostKey(fingerprint, keyType, trust === 'changed' ? this.config.expectedFingerprint : undefined)) {
       throw new SSHAuthDefectError('Host key was not accepted');
     }
+    this.config.expectedFingerprint = fingerprint;
     this.status('host_key_verified', `Host key verified (${keyType})`);
 
     this.sessionId ??= hash;

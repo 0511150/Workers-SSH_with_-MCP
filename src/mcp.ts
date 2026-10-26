@@ -6,8 +6,8 @@ import { jsonError, secureResponse } from './http-security';
 const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
 const str = { type: 'string' };
 export const tools = [
-  { name: 'vps_list', description: 'List saved servers without passwords or private keys.', inputSchema: schema({}, []), annotations: { readOnlyHint: true, openWorldHint: false } },
-  { name: 'vps_getdata', description: 'Return all connection details, including the SSH password or private key, for one saved server. Sensitive: never publish or log the returned credentials.', inputSchema: schema({ id: str }, ['id']), annotations: { readOnlyHint: true, openWorldHint: false } },
+  { name: 'vps_list', description: 'List saved servers including recorded SHA-256 host fingerprints, without passwords or private keys.', inputSchema: schema({}, []), annotations: { readOnlyHint: true, openWorldHint: false } },
+  { name: 'vps_getdata', description: 'Return all connection details, including the recorded SHA-256 fingerprint and SSH password or private key, for one saved server. Sensitive: never publish or log the returned credentials.', inputSchema: schema({ id: str }, ['id']), annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: 'vps_inspect', description: 'Open a temporary SSH connection to a saved Linux server, sample CPU, memory, disk, network speed and load, then disconnect. Requires a previously verified host fingerprint. No persistent session or arbitrary command execution.', inputSchema: schema({ id: str }, ['id']), annotations: { readOnlyHint: true, openWorldHint: true } },
 ];
 const versions = ['2025-03-26', '2025-06-18', '2025-11-25'];
@@ -50,7 +50,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
     else {
       const server = await vault.server(args.id as string);
       host = server.host;
-      result = params.name === 'vps_getdata' ? server : await inspectServer(server, request.signal);
+      result = params.name === 'vps_getdata' ? { ...server, fingerprint: server.expectedFingerprint ?? null } : await inspectServer(server, request.signal);
     }
     await audit(true);
     return rpc(id, { content: [{ type: 'text', text: JSON.stringify(result) }] });

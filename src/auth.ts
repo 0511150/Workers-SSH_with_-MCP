@@ -2,13 +2,19 @@ import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './types';
 import { attempt, validSecret, type BanState } from './auth-policy';
 import { jsonError, secureResponse } from './http-security';
-import { openServer, parseServer, sealServer, serverSummary } from './server-vault';
+import { openServer, parseServer, sealServer, serverSummary, type ServerRecord } from './server-vault';
 
 export class AuthGuard extends DurableObject<Env> {
   async saveServer(raw: unknown): Promise<void> {
-    const server = parseServer(raw);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid server');
+    const data = raw as Record<string, unknown>;
+    const credential = typeof data.keyId === 'string' ? await this.key(data.keyId) : null;
+    const server = parseServer(credential ? { ...data, privateKey: credential.privateKey } : data);
+    if (server.authMethod !== 'publickey' && credential) throw new Error('A shared key requires publickey authentication');
+    if (credential) delete server.privateKey;
     const encrypted = await sealServer(server, this.env.ACCESS_KEY);
     await this.ctx.storage.transaction(async tx => {
+      if (server.keyId && !await tx.get(`key:${server.keyId}`)) throw new Error('Saved key no longer exists');
       const entries = await tx.list({ prefix: 'server:', limit: 101 });
       if (!entries.has(`server:${server.id}`) && entries.size >= 100) throw new Error('Server limit is 100');
       await tx.put(`server:${server.id}`, encrypted);
@@ -17,7 +23,11 @@ export class AuthGuard extends DurableObject<Env> {
   async server(id: string) {
     const encrypted = await this.ctx.storage.get<Awaited<ReturnType<typeof sealServer>>>(`server:${id}`);
     if (!encrypted) throw new Error('Server not found');
-    try { return await openServer(id, encrypted, this.env.ACCESS_KEY); }
+    try {
+      const server = await openServer(id, encrypted, this.env.ACCESS_KEY);
+      if (server.keyId) server.privateKey = (await this.key(server.keyId)).privateKey;
+      return server;
+    }
     catch { throw new Error('Cannot decrypt server credentials with current ACCESS_KEY'); }
   }
   async servers() {
@@ -25,6 +35,49 @@ export class AuthGuard extends DurableObject<Env> {
     return Promise.all([...entries.keys()].map(async key => serverSummary(await this.server(key.slice(7)))));
   }
   async removeServer(id: string): Promise<void> { await this.ctx.storage.delete(`server:${id}`); }
+  async pinServer(id: string, fingerprint: string, previous: string): Promise<void> {
+    if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) throw new Error('Invalid fingerprint');
+    await this.ctx.storage.transaction(async tx => {
+      const encrypted = await tx.get<Awaited<ReturnType<typeof sealServer>>>(`server:${id}`);
+      if (!encrypted) throw new Error('Server not found');
+      const server = await openServer(id, encrypted, this.env.ACCESS_KEY);
+      if (server.expectedFingerprint === fingerprint) return;
+      if ((server.expectedFingerprint ?? '') !== previous) throw new Error('Server fingerprint changed concurrently; reconnect to verify it');
+      server.expectedFingerprint = fingerprint; server.updatedAt = Date.now();
+      await tx.put(`server:${id}`, await sealServer(server, this.env.ACCESS_KEY));
+    });
+  }
+  async saveKey(raw: unknown): Promise<void> {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid key');
+    const data = raw as Record<string, unknown>;
+    if (typeof data.id !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(data.id) || typeof data.name !== 'string' || !data.name.trim() || data.name.length > 64 || typeof data.privateKey !== 'string' || data.privateKey.length > 65536 || /ENCRYPTED/.test(data.privateKey) || !/^-----BEGIN (?:OPENSSH PRIVATE KEY|RSA PRIVATE KEY|PRIVATE KEY)-----/.test(data.privateKey.trim())) throw new Error('A name and unencrypted OpenSSH / RSA private key are required');
+    const record = { id: data.id, name: data.name.trim(), privateKey: data.privateKey.trim(), updatedAt: Date.now() };
+    const encrypted = await sealServer(record, this.env.ACCESS_KEY);
+    await this.ctx.storage.transaction(async tx => {
+      const keys = await tx.list({ prefix: 'key:', limit: 101 });
+      if (!keys.has(`key:${record.id}`) && keys.size >= 100) throw new Error('Key limit is 100');
+      await tx.put(`key:${record.id}`, encrypted);
+    });
+  }
+  async key(id: string): Promise<{ id: string; name: string; privateKey: string; updatedAt: number }> {
+    const encrypted = await this.ctx.storage.get<Awaited<ReturnType<typeof sealServer>>>(`key:${id}`);
+    if (!encrypted) throw new Error('Saved key not found');
+    return openServer(id, encrypted, this.env.ACCESS_KEY);
+  }
+  async keys() {
+    const entries = await this.ctx.storage.list({ prefix: 'key:', limit: 100 });
+    return Promise.all([...entries.keys()].map(async key => { const { id, name, updatedAt } = await this.key(key.slice(4)); return { id, name, updatedAt }; }));
+  }
+  async removeKey(id: string): Promise<void> {
+    const encrypted = await this.ctx.storage.get<Awaited<ReturnType<typeof sealServer>>>(`key:${id}`);
+    if (!encrypted) return;
+    // Serialize the reference check and delete; a server save checks the key again below.
+    await this.ctx.storage.transaction(async tx => {
+      const records = await tx.list<Awaited<ReturnType<typeof sealServer>>>({ prefix: 'server:', limit: 100 });
+      for (const [key, value] of records) if ((await openServer<ServerRecord>(key.slice(7), value, this.env.ACCESS_KEY)).keyId === id) throw new Error('Key is in use; change the linked servers before deleting it');
+      await tx.delete(`key:${id}`);
+    });
+  }
   async recordCall(entry: { tool: string; host: string; success: boolean; duration: number }): Promise<void> {
     await this.ctx.storage.transaction(async tx => {
       const rows = await tx.get<unknown[]>('mcp-calls') ?? [];

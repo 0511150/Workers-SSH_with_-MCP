@@ -1,4 +1,5 @@
 import { test, after } from 'node:test';
+import { generateKeyPairSync } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -195,6 +196,10 @@ test('SQLite ban survives disposal and a fresh runtime, and missing or short key
   await first.dispatchFetch('https://example.com/__test_seed?ip=203.0.113.240', { method: 'POST', body: JSON.stringify({ failures: 0, strikes: 4, until: -1 }) });
   await first.dispatchFetch('https://example.com/__test_seed_calls', { method: 'POST', body: JSON.stringify([{ id: 'persistent-audit', timestamp: 1, tool: 'ssh_read', host: '', success: true, duration: 2 }]) });
   await first.dispatchFetch('https://example.com/api/servers', { method: 'PUT', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'persistent', host: 'example.com', port: 22, username: 'test', authMethod: 'password', password: 'persistent-secret' }) });
+  const persistentKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' });
+  const authHeaders = { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
+  await first.dispatchFetch('https://example.com/api/keys', { method: 'PUT', headers: authHeaders, body: JSON.stringify({ id: 'persistent-key', name: 'Persisted', privateKey: persistentKey }) });
+  await first.dispatchFetch('https://example.com/api/servers', { method: 'PUT', headers: authHeaders, body: JSON.stringify({ id: 'persistent-key-server', host: 'example.com', port: 22, username: 'key-user', authMethod: 'publickey', keyId: 'persistent-key' }) });
   await first.dispose();
   const restarted = createMiniflare(options);
   try {
@@ -207,9 +212,45 @@ test('SQLite ban survives disposal and a fresh runtime, and missing or short key
     assert.ok((await audit.json()).calls.some(row => row.id === 'persistent-audit'));
     const saved = await restarted.dispatchFetch('https://example.com/api/servers?id=persistent', { headers: { Authorization: `Bearer ${key}` } });
     assert.equal((await saved.json()).server.password, 'persistent-secret');
+    const savedKeyServer = await restarted.dispatchFetch('https://example.com/api/servers?id=persistent-key-server', { headers: authHeaders });
+    assert.equal((await savedKeyServer.json()).server.privateKey, persistentKey.trim());
     await restarted.setOptions(convertOptions({ ...options, bindings: { ACCESS_KEY: 'short' } }));
     assert.equal((await restarted.dispatchFetch('https://example.com/api/session')).status, 503);
     await restarted.setOptions(convertOptions({ ...options, bindings: {} }));
     assert.equal((await restarted.dispatchFetch('https://example.com/api/session')).status, 503);
   } finally { await restarted.dispose(); }
+});
+
+test('saved private key is reusable across servers; fingerprints round-trip in MCP and updates detect races', async () => {
+  const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' });
+  const headers = { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
+  const put = (path, data, method = 'PUT') => request(path, { method, headers, body: JSON.stringify(data) });
+  assert.equal((await put('/api/keys', { id: 'shared-key', name: 'Shared', privateKey })).status, 200);
+  const keyList = await (await request('/api/keys', { headers })).text();
+  assert.equal(keyList.includes(privateKey), false);
+  for (const id of ['server-a', 'server-b']) {
+    assert.equal((await put('/api/servers', { id, host: 'example.com', port: 22, username: id, authMethod: 'publickey', keyId: 'shared-key' })).status, 200);
+    const detail = await (await mcp(rpc('tools/call', { name: 'vps_getdata', arguments: { id } }))).json();
+    const server = JSON.parse(detail.result.content[0].text);
+    assert.equal(server.privateKey, privateKey.trim()); assert.equal(server.fingerprint, null);
+  }
+  assert.equal((await request('/api/keys?id=shared-key', { method: 'DELETE', headers })).status, 400);
+  const fingerprint = `SHA256:${'a'.repeat(43)}`;
+  assert.equal((await put('/api/servers?id=server-a', { fingerprint }, 'PATCH')).status, 200);
+  const changed = `SHA256:${'b'.repeat(43)}`;
+  assert.equal((await put('/api/servers?id=server-a', { fingerprint: changed }, 'PATCH')).status, 400);
+  assert.equal((await put('/api/servers?id=server-a', { fingerprint: changed, previousFingerprint: fingerprint }, 'PATCH')).status, 200);
+  const listed = JSON.parse((await (await mcp(rpc('tools/call', { name: 'vps_list' }))).json()).result.content[0].text);
+  assert.equal(listed.servers.find(server => server.id === 'server-a').fingerprint, changed);
+  for (const id of ['server-a', 'server-b']) await request(`/api/servers?id=${id}`, { method: 'DELETE', headers });
+  assert.equal((await request('/api/keys?id=shared-key', { method: 'DELETE', headers })).status, 200);
+});
+test('isolated session documents require login and permit only same-origin embedding', async () => {
+  const login = await request('/auth/login', { method: 'POST', headers: { Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+  const headers = { Cookie: login.headers.get('set-cookie').split(';')[0] };
+  const child = await request('/session-view?id=test', { headers });
+  assert.equal(child.headers.get('x-frame-options'), 'SAMEORIGIN');
+  assert.match(child.headers.get('content-security-policy'), /frame-ancestors 'self'/);
+  assert.equal((await request('/', { headers })).headers.get('x-frame-options'), 'DENY');
+  assert.match(await (await request('/session-view')).text(), /PRIVATE ACCESS/);
 });

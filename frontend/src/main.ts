@@ -1,3 +1,4 @@
+import { mountKeySelector } from './key-vault-ui';
 import { serverApi, type RemoteServer } from './server-api';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -397,6 +398,7 @@ const remoteProfileNames = new Map<string, string>();
 function rememberRemoteIds(): void { try { localStorage.setItem('workers-ssh.remote-ids', JSON.stringify([...remoteProfileIds])); } catch { /* Remote storage remains authoritative. */ } }
 let switchWorkspace: ReturnType<typeof mountSwitchWorkspace> | null = null;
 let hostKeys = loadHostKeys();
+const embeddedSession = location.pathname === '/session-view';
 let socket: WebSocket | null = null;
 let connectionState: ConnectionState = 'idle';
 let sessionStartedAt = 0;
@@ -1163,6 +1165,9 @@ function validateConnectForm(): string | null {
   return validateConnection();
 }
 
+let selectedVaultFingerprint = '';
+const savedKeySelector = mountKeySelector(ui.privateKey, message => toast(message, 'error'));
+
 async function applyProfile(profile: SavedProfile): Promise<void> {
   const loadGeneration = ++historyPasswordLoadGeneration;
   const context = passwordContext(profile);
@@ -1186,10 +1191,13 @@ async function applyProfile(profile: SavedProfile): Promise<void> {
       if (loadGeneration !== historyPasswordLoadGeneration) return;
       ui.password.value = server.password ?? '';
       ui.privateKey.value = server.privateKey ?? '';
+      await savedKeySelector.set(server.keyId ?? '');
+      selectedVaultFingerprint = server.expectedFingerprint ?? '';
       ui.fingerprint.value = server.expectedFingerprint ?? ui.fingerprint.value;
     } finally { if (loadGeneration === historyPasswordLoadGeneration) { historyPasswordLoading = false; setState(connectionState); } }
     return;
   }
+  if (profile.authMethod === 'publickey') await savedKeySelector.set();
   if (!historyPasswordLoading) return;
   const key = await getHistoryPasswordKey();
   const decrypted = key
@@ -1368,6 +1376,7 @@ function updateConnectionStatus(message: LocalizedMessage): void {
 
 function setState(state: ConnectionState, label?: string): void {
   connectionState = state;
+  if (embeddedSession) parent.postMessage({ type: 'workspace-state', state }, location.origin);
   const stateLabel = label ?? ({
     idle: bilingual('离线', 'Offline'),
     connecting: bilingual('连接中', 'Connecting'),
@@ -1508,6 +1517,13 @@ function markReady(message = bilingual('交互式 Shell 已就绪', 'Interactive
   terminal.focus();
 }
 
+function persistServerFingerprint(fingerprint: string): void {
+  const id = ui.profileId.value;
+  if (!id || !remoteProfileIds.has(id)) return;
+  const previousFingerprint = selectedVaultFingerprint;
+  void serverApi(`?id=${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ fingerprint, previousFingerprint }) }).then(() => { if (ui.profileId.value === id) selectedVaultFingerprint = fingerprint; }).catch(() => toast('指纹已用于本次连接，但保存失败；请重新保存主机。', 'error'));
+}
+
 function sendHostKeyDecision(accept: boolean): void {
   if (!awaitingHostKeyDecision || !pendingHostKey || socket?.readyState !== WebSocket.OPEN) return;
   const hostKey = pendingHostKey;
@@ -1518,9 +1534,11 @@ function sendHostKeyDecision(accept: boolean): void {
     accept,
     fingerprint: hostKey.fingerprint,
   }));
+  if (accept) { currentExpectedFingerprint = hostKey.fingerprint; if (reconnectParams) reconnectParams.pinnedKey = hostKey.fingerprint; }
   if (accept && ui.rememberHostKey.checked && currentTargetKey) {
     currentRememberedFingerprint = hostKey.fingerprint;
     void replaceRememberedHostKey(currentTargetKey, hostKey.fingerprint);
+    persistServerFingerprint(hostKey.fingerprint);
     if (targetKey() === currentTargetKey) ui.fingerprint.value = hostKey.fingerprint;
   }
   event(accept
@@ -1679,11 +1697,17 @@ function handleServerMessage(message: ServerMessage): void {
       return;
     }
     if (trust === 'matched') {
+      persistServerFingerprint(fingerprint);
       event(bilingual('已固定的主机密钥匹配。', 'Pinned host key matched.'), 'host-key');
       return;
     }
     pendingHostKey = { fingerprint, keyType, expectedFingerprint: expected, trust };
     awaitingHostKeyDecision = true;
+    if (trust === 'first-seen') {
+      ui.rememberHostKey.checked = true;
+      sendHostKeyDecision(true);
+      return;
+    }
     configureHostKeyDialog(pendingHostKey);
     ui.hostKeyTarget.textContent = ui.sessionTitle.textContent ?? currentTargetKey;
     ui.hostKeyType.textContent = keyType;
@@ -2284,16 +2308,7 @@ for (const radio of ui.form.querySelectorAll<HTMLInputElement>('input[name="auth
     setAuthMethod(authMethod());
   });
 }
-ui.form.addEventListener('submit', (formEvent) => {
-  formEvent.preventDefault();
-  if (connectionState === 'connecting' || connectionState === 'connected') {
-    disconnect(connectionState === 'connecting'
-      ? bilingual('连接已取消', 'Connection cancelled')
-      : bilingual('已由用户断开连接', 'Disconnected by user'));
-  } else if (connectionState !== 'disconnecting') {
-    void connect();
-  }
-});
+ui.form.addEventListener('submit', event => { event.preventDefault(); document.getElementById('switch-save-server')?.click(); });
 ui.shareLink.addEventListener('click', copySafeLink);
 ui.password.addEventListener('input', () => {
   cancelHistoryPasswordLoad();
@@ -2362,7 +2377,11 @@ ui.emptyConnect.addEventListener('click', () => {
   setPanelOpen(true);
   requestAnimationFrame(() => ui.host.focus());
 });
-ui.clearTerminal.addEventListener('click', () => terminal.clear());
+ui.clearTerminal.disabled = !embeddedSession;
+ui.clearTerminal.addEventListener('click', () => {
+  if (embeddedSession) parent.postMessage({ type: 'workspace-close-request' }, location.origin);
+  else document.dispatchEvent(new Event('workspace-close-active'));
+});
 ui.fileManagerTab.addEventListener('click', () => toggleWorkspaceTab('files'));
 ui.networkDetailTab.addEventListener('click', () => toggleWorkspaceTab('network'));
 ui.processManagerTab.addEventListener('click', () => toggleWorkspaceTab('processes'));
@@ -2567,6 +2586,14 @@ async function initialize(): Promise<void> {
   ui.eventMessage.textContent = bilingual('Worker 运行时待命', 'Worker runtime standing by');
   initializeCompatibilityAPI();
   initMobileToolbar();
+  if (embeddedSession) {
+    document.documentElement.classList.add('session-embedded');
+    const id = new URLSearchParams(location.search).get('id');
+    const profile = profiles.find(p => p.id === id);
+    if (profile) { await applyProfile(profile); await connect(); if (new URLSearchParams(location.search).has('files')) setWorkspaceTab('files'); }
+    else toast('此服务器不存在，请关闭标签并重新保存主机。', 'error');
+    return;
+  }
   const shouldAutoConnect = applyURLParameters();
   requestAnimationFrame(() => {
     fitTerminal(false);
@@ -2602,9 +2629,18 @@ logoutButton.addEventListener('click', async () => {
   } finally { logoutButton.disabled = false; }
 });
 document.querySelector('.topbar')?.append(logoutButton);
+window.addEventListener('message', event => {
+  if (!embeddedSession || event.origin !== location.origin || event.source !== parent) return;
+  if (event.data?.type === 'workspace-close') disconnect();
+  if (event.data?.type === 'workspace-resize') fitTerminal(true);
+  if (event.data?.type === 'workspace-theme' && ['light', 'dark'].includes(event.data.theme)) document.documentElement.dataset.theme = event.data.theme;
+  if (event.data?.type === 'workspace-font' && Number.isFinite(event.data.size) && event.data.size >= 11 && event.data.size <= 20) { terminal.options.fontSize = event.data.size; fitTerminal(true); }
+  if (event.data?.type === 'workspace-view') { setWorkspaceTab(event.data.files ? 'files' : null); fitTerminal(true); }
+});
 
 switchWorkspace = mountSwitchWorkspace({
   hosts: () => profiles,
+  prepareNew: () => { void savedKeySelector.set(); },
   name: host => remoteProfileNames.get(host.id) ?? host.host,
   select: applyProfile,
   remove: deleteProfile,
@@ -2624,10 +2660,11 @@ switchWorkspace = mountSwitchWorkspace({
       if (collision) throw new Error('此地址和账号已有主机记录，请编辑已有记录。');
       profile.id = previous.id;
     }
+    const keyId = profile.authMethod === 'publickey' ? await savedKeySelector.ensureSaved((document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host) : undefined;
     await serverApi('', { method: 'PUT', body: JSON.stringify({
       id: profile.id, name: (document.getElementById('switch-host-name') as HTMLInputElement).value.trim() || profile.host,
       host: profile.host, port: profile.port, username: profile.username, authMethod: profile.authMethod,
-      ...(profile.authMethod === 'password' ? { password: ui.password.value } : { privateKey: ui.privateKey.value }),
+      ...(profile.authMethod === 'password' ? { password: ui.password.value } : { keyId }),
       ...(profile.fingerprint ? { expectedFingerprint: profile.fingerprint } : {}),
     }) });
     remoteProfileIds.add(profile.id);

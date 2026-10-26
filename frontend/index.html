@@ -241,9 +241,9 @@
 
           <p
             class="privacy-note"
-            data-i18n-zh="点击“保存到主机仓库”会将密码或私钥加密保存，供网页和 MCP 共用。仅连接时仍只保存浏览器历史，私钥不会写入浏览器存储。"
-            data-i18n-en="Save to the server vault to encrypt and share credentials with WebSSH and MCP. Connecting alone only saves browser history; private keys are never persisted in the browser."
-          >点击“保存到主机仓库”会将密码或私钥加密保存，供网页和 MCP 共用。仅连接时仍只保存浏览器历史，私钥不会写入浏览器存储。</p>
+            data-i18n-zh="保存服务器后，从主机列表打开终端。密钥加密保存在密钥仓库，可供多个服务器选择复用，不写入浏览器持久存储。"
+            data-i18n-en="Save the server, then open a terminal from the server list. Encrypted saved keys can be reused by multiple servers and are not persisted in browser storage."
+          >保存服务器后，从主机列表打开终端。密钥加密保存在密钥仓库，可供多个服务器选择复用，不写入浏览器持久存储。</p>
         </aside>
 
         <main class="workspace">
@@ -306,15 +306,7 @@
                   <div><span data-i18n-zh="主机密钥" data-i18n-en="HOST KEY">主机密钥</span><strong id="metric-host-key">--</strong></div>
                 </div>
                 <div class="terminal-actions">
-                  <button id="clear-terminal" class="toolbar-button" type="button" aria-label="清屏" data-i18n-aria-label-zh="清屏" data-i18n-aria-label-en="Clear">
-                    <svg class="toolbar-button-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M3 6h18" />
-                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      <line x1="10" x2="10" y1="11" y2="17" />
-                      <line x1="14" x2="14" y1="11" y2="17" />
-                    </svg>
-                    <span class="button-label" data-i18n-zh="清屏" data-i18n-en="Clear">清屏</span>
-                  </button>
+                  <button id="clear-terminal" class="toolbar-button" type="button" aria-label="关闭终端" data-i18n-aria-label-zh="关闭终端" data-i18n-aria-label-en="Close terminal"><span aria-hidden="true">×</span><span class="button-label" data-i18n-zh="关闭终端" data-i18n-en="Close terminal">关闭终端</span></button>
                 </div>
               </div>
               <div id="terminal-stage" class="terminal-stage">
